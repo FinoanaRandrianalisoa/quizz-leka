@@ -1,0 +1,17 @@
+Django>=5.0,<6.0
+strawberry-graphql-django>=0.30,<1.0
+django-filter>=24.0
+PyJWT>=2.8
+channels[daphne]>=4.0
+channels-redis>=4.0
+celery>=5.3
+django-celery-beat>=2.6
+django-environ>=0.11
+django-cors-headers>=4.0
+django-redis>=5.4
+redis>=5.0
+argon2-cffi>=23.1
+psycopg[binary]>=3.1
+Pillow>=10.0
+boto3>=1.34
+sentry-sdk[django]>=2.0

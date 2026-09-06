@@ -8,7 +8,7 @@ env = environ.Env(
     SECRET_KEY=(str, "unsafe-default-secret-key"),
     ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1"]),
     CORS_ALLOWED_ORIGINS=(list, ["http://localhost:3000"]),
-    DATABASE_URL=(str, "postgres://postgres:postgres@localhost:5432/quizz"),
+    DATABASE_URL=(str, "postgres://mahafeno:antso0201@postgresql-mahafeno.alwaysdata.net:5432/mahafeno_quizz"),
     REDIS_URL=(str, "redis://localhost:6379/0"),
     CELERY_BROKER_URL=(str, "redis://localhost:6379/1"),
 )

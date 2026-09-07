@@ -1,5 +1,6 @@
-import environ
 from pathlib import Path
+
+import environ
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -145,26 +146,38 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = env.int(
 )
 
 # --- CORS & CSRF ---
-# Fusion des origines autorisées dans env + valeurs explicites
-RAW_CORS_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
-CORS_ALLOWED_ORIGINS = list(
-    set(
-        RAW_CORS_ORIGINS
-        + [
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://localhost:8443",
-            "https://frontend-quizz-leka-hkq7.vercel.app",
-        ]
-    )
+# Fusion des origines autorisées dans env + valeurs explicites, puis
+# normalisation : le header HTTP `Origin` ne contient JAMAIS de slash final,
+# donc on retire les "/" de fin d'une éventuelle valeur configurée par erreur.
+def _nettoyer_origines(chaines):
+    origines = set()
+    for valeur in chaines:
+        for item in valeur.split(",") if "," in valeur else [valeur]:
+            item = (item or "").strip().rstrip("/")
+            if item:
+                origines.add(item)
+    return sorted(origines)
+
+
+CORS_ALLOWED_ORIGINS = _nettoyer_origines(
+    env.list("CORS_ALLOWED_ORIGINS", default=[])
+    + [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8443",
+        "https://frontend-quizz-leka-hkq7.vercel.app",
+    ]
 )
 
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOW_ALL_ORIGINS = env.bool("CORS_ALLOW_ALL_ORIGINS", default=False)
 
-# Expression régulière pour valider Vercel dynamiquement (Production + Previews)
+# Expressions régulières pour valider les origines dynamiques :
+# - Vercel (production + previews) ;
+# - Railway (services `.up.railway.app`, ex. le conteneur nginx du frontend).
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https:\/\/.*\.vercel\.app$",
+    r"^https:\/\/.*\.up\.railway\.app$",
 ]
 
 CORS_ALLOW_HEADERS = [

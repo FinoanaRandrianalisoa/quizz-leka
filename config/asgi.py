@@ -17,9 +17,12 @@ from channels.security.websocket import AllowedHostsOriginValidator  # noqa: E40
 from config.routing import websocket_urlpatterns  # noqa: E402
 from apps.auth.middleware import JWTAuthMiddleware  # noqa: E402
 
+# Apply CORS middleware for ASGI
+from corsheaders.middleware import CorsMiddleware  # noqa: E402
+
 application = ProtocolTypeRouter(
     {
-        "http": django_asgi_app,
+        "http": CorsMiddleware(django_asgi_app),
         "websocket": AllowedHostsOriginValidator(
             JWTAuthMiddleware(URLRouter(websocket_urlpatterns))
         ),

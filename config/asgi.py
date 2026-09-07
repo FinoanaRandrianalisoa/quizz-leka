@@ -24,27 +24,44 @@ class ASGICORSMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
-            # Handle CORS preflight and add headers
+            # Get origin from request headers
+            headers_dict = dict(scope.get("headers", []))
+            origin = headers_dict.get(b"origin")
+            if origin:
+                origin = origin.decode()
+            
+            # Handle OPTIONS preflight request
+            if scope["method"] == "OPTIONS":
+                from django.conf import settings
+                allowed_origins = getattr(settings, "CORS_ALLOWED_ORIGINS", [])
+                
+                if origin and (origin in allowed_origins or any(allowed in origin for allowed in allowed_origins)):
+                    await send({
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [
+                            (b"access-control-allow-origin", origin.encode()),
+                            (b"access-control-allow-credentials", b"true"),
+                            (b"access-control-allow-methods", b"GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+                            (b"access-control-allow-headers", b"content-type, authorization, x-requested-with, accept, origin"),
+                            (b"access-control-max-age", b"86400"),
+                        ],
+                    })
+                    await send({"type": "http.response.body", "body": b""})
+                    return
+            
+            # Handle regular requests
             async def send_wrapper(message):
                 if message["type"] == "http.response.start":
                     headers = dict(message.get("headers", []))
                     
-                    # Add CORS headers
-                    origin = None
-                    for header_name, header_value in headers.items():
-                        if header_name.lower() == b"origin":
-                            origin = header_value.decode()
-                            break
-                    
+                    # Add CORS headers for allowed origins
                     if origin:
-                        # Check if origin is allowed
                         from django.conf import settings
                         allowed_origins = getattr(settings, "CORS_ALLOWED_ORIGINS", [])
                         if origin in allowed_origins or any(allowed in origin for allowed in allowed_origins):
                             headers[b"access-control-allow-origin"] = origin.encode()
                             headers[b"access-control-allow-credentials"] = b"true"
-                            headers[b"access-control-allow-methods"] = b"GET, POST, PUT, PATCH, DELETE, OPTIONS"
-                            headers[b"access-control-allow-headers"] = b"content-type, authorization, x-requested-with, accept, origin"
                     
                     message["headers"] = list(headers.items())
                 await send(message)

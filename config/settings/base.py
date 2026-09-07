@@ -6,7 +6,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 env = environ.Env(
     DEBUG=(bool, False),
     SECRET_KEY=(str, "unsafe-default-secret-key"),
-    ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1", "quizz-leka.onrender.com", ".onrender.com"]),
+    ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1", "quizz-leka-production.up.railway.app", ".up.railway.app"]),
     CORS_ALLOWED_ORIGINS=(
         list,
         [
@@ -33,7 +33,7 @@ DEBUG = env("DEBUG")
 ALLOWED_HOSTS = list(
     set(
         env.list("ALLOWED_HOSTS", default=[])
-        + ["localhost", "127.0.0.1", "quizz-leka.onrender.com", ".onrender.com"]
+        + ["localhost", "127.0.0.1", "quizz-leka-production.up.railway.app", ".up.railway.app"]
     )
 )
 
@@ -192,7 +192,7 @@ CORS_ALLOW_METHODS = [
 CSRF_TRUSTED_ORIGINS = [
     "https://frontend-quizz-leka-hkq7.vercel.app",
     "https://*.vercel.app",
-    "https://quizz-leka.onrender.com",
+    "https://quizz-leka-production.up.railway.app",
 ]
 
 # Channels

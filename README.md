@@ -221,7 +221,7 @@ cp Back/.env.example Back/.env
 docker compose up -d --build
 
 # Accéder aux services
-# API GraphQL (GraphiQL) : https://quizz-leka.onrender.com/graphql/
+# API GraphQL (GraphiQL) : https://quizz-leka-production.up.railway.app/graphql/
 # Frontend (nginx)       : http://localhost:8443/
 # Flower (Celery UI)     : http://localhost:5555/
 ```

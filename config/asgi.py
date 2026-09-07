@@ -49,7 +49,7 @@ class ASGICORSMiddleware:
                     })
                     await send({"type": "http.response.body", "body": b""})
                     return
-            
+            # Handle regular requests
             # Handle regular requests
             async def send_wrapper(message):
                 if message["type"] == "http.response.start":

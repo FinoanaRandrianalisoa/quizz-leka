@@ -56,3 +56,10 @@ class QuizGlobalMutation:
         """Refuse une invitation Quizz Global reçue."""
         user = get_current_user(info)
         return services.refuser_invitation(user, game_id)
+
+    @strawberry.mutation
+    def revanche_partie_quiz_global(self, info: Info, game_id: int) -> QuizGlobalState:
+        """Recrée une partie immédiate contre le même adversaire après une partie terminée."""
+        user = get_current_user(info)
+        game = services.revanche_game(user, game_id)
+        return to_state(game, user)

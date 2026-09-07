@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from apps.quiz_global.errors import AnswerRejectedError, NotYourTurnError, QuizGlobalError, ThemeUnavailableError
 from apps.quiz_global.models import QuizGlobalGame, QuizGlobalGameQuestion, QuizGlobalPlayerAnswer
-from apps.quiz_global.services import create_game, join_game, select_theme, serialize_game, submit_answer, tick
+from apps.quiz_global.services import create_game, join_game, revanche_game, select_theme, serialize_game, submit_answer, tick
 from apps.themes.models import Theme
 from apps.users.models import Utilisateur
 
@@ -212,3 +212,60 @@ def test_graphql_quiz_global_flow(client):
     assert chosen["data"]["choisirThemeQuizGlobal"]["status"] == "QUESTION_READING"
     assert chosen["data"]["choisirThemeQuizGlobal"]["question"]["correctOption"] is None
     assert chosen["data"]["choisirThemeQuizGlobal"]["question"]["options"] is None
+
+
+@pytest.mark.django_db
+def test_revanche_reattaches_same_players():
+    a, b, game = _start_pair(target=8)
+    game.status = QuizGlobalGame.Status.FINISHED
+    game.save(update_fields=["status"])
+    new_game = revanche_game(a, game.pk)
+    new_game.refresh_from_db()
+    assert new_game.status == QuizGlobalGame.Status.THEME_SELECTION
+    assert new_game.target_questions == 8
+    seats = {p.seat: p.player_id for p in new_game.players.all()}
+    assert seats == {"A": a.pk, "B": b.pk}
+
+
+@pytest.mark.django_db
+def test_revanche_rejects_non_finished_and_outsiders():
+    a, _, game = _start_pair()
+    with pytest.raises(QuizGlobalError):
+        revanche_game(a, game.pk)
+    stranger = _user("stranger@quiz.mg", "StrangerQ")
+    game.status = QuizGlobalGame.Status.FINISHED
+    game.save(update_fields=["status"])
+    with pytest.raises(QuizGlobalError):
+        revanche_game(stranger, game.pk)
+
+
+@pytest.mark.django_db
+def test_graphql_revanche_partie_quiz_global(client):
+    from apps.quiz_global.models import QuizGlobalGame as GameModel
+
+    def gql(query, token=None):
+        kwargs = {"content_type": "application/json"}
+        if token:
+            kwargs["HTTP_AUTHORIZATION"] = f"Bearer {token}"
+        r = client.post("/graphql/", data={"query": query}, **kwargs)
+        return json.loads(r.content)
+
+    def register(email, pseudo):
+        resp = gql(
+            f'mutation {{ register(input: {{ email: "{email}", pseudo: "{pseudo}", password: "MotDePasse1!" }}) {{ accessToken }} }}'
+        )
+        assert "errors" not in resp, resp
+        return resp["data"]["register"]["accessToken"]
+
+    tok_a = register("ra@quiz.mg", "RevancheA")
+    tok_b = register("rb@quiz.mg", "RevancheB")
+    created = gql("mutation { creerPartieQuizGlobal(targetQuestions: 4) { gameId } }", tok_a)
+    game_id = created["data"]["creerPartieQuizGlobal"]["gameId"]
+    gql(f"mutation {{ rejoindrePartieQuizGlobal(gameId: {game_id}) {{ status }} }}", tok_b)
+    GameModel.objects.filter(pk=game_id).update(status=GameModel.Status.FINISHED)
+    revanche = gql(f"mutation {{ revanchePartieQuizGlobal(gameId: {game_id}) {{ gameId status targetQuestions }} }}", tok_a)
+    assert "errors" not in revanche, revanche
+    payload = revanche["data"]["revanchePartieQuizGlobal"]
+    assert payload["status"] == "THEME_SELECTION"
+    assert payload["targetQuestions"] == 4
+    assert payload["gameId"] != game_id

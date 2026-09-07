@@ -61,6 +61,18 @@ class QuizGlobalConsumer(AsyncJsonWebsocketConsumer):
                 state = await database_sync_to_async(self._state)()
                 if state:
                     await self.send_json(state)
+            elif event in {"CHAT", "MESSAGE"}:
+                await self.channel_layer.group_send(
+                    self.group_name,
+                    {
+                        "type": "quiz.event",
+                        "data": {
+                            "type": "message",
+                            "envoyeur": content.get("envoyeur") or self.user.pseudo,
+                            "message": content.get("message") or "",
+                        },
+                    },
+                )
         except QuizGlobalError as exc:
             await self.send_json({"event": "ERROR", "code": exc.code, "message": exc.message})
         except Exception:

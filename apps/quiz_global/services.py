@@ -596,6 +596,46 @@ def tick(game_id: int) -> QuizGlobalGame | None:
     return game
 
 
+@transaction.atomic
+def revanche_game(user, game_id: int, target_questions: int | None = None) -> QuizGlobalGame:
+    """Recrée une partie immédiate contre le même adversaire après une partie terminée."""
+    game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
+    if game is None:
+        raise MatchNotFoundError()
+    if game.status != QuizGlobalGame.Status.FINISHED:
+        raise QuizGlobalError("Seules les parties terminées peuvent avoir une revanche.")
+    players = _player_map(game)
+    if user.pk not in {p.player_id for p in players.values()}:
+        raise QuizGlobalError("Vous ne participez pas à cette partie.")
+    opponent = next((p.player for p in players.values() if p.player_id != user.pk and p.player is not None), None)
+    if opponent is None:
+        raise QuizGlobalError("Aucun adversaire disponible pour une revanche.")
+    if target_questions is not None and target_questions not in TARGET_ALLOWED:
+        raise ValidationError("Le nombre de questions doit être 4, 8 ou 12.")
+    now = timezone.now()
+    new_game = QuizGlobalGame.objects.create(
+        target_questions=target_questions or game.target_questions,
+        status=QuizGlobalGame.Status.THEME_SELECTION,
+        active_seat="A",
+        started_at=now,
+        phase_started_at=now,
+    )
+    QuizGlobalPlayer.objects.create(game=new_game, player=user, seat="A")
+    QuizGlobalPlayer.objects.create(game=new_game, player=opponent, seat="B")
+    _notify(new_game, "GAME_CREATED")
+    _notify(new_game, "GAME_STARTED")
+    _notify(new_game, "THEME_SELECTION_STARTED")
+    envoyer_notification(
+        opponent,
+        Notification.Type.DEFI_RECU,
+        "Revanche Quizz Global",
+        f"{user.pseudo} vous invite à une revanche Quizz Global ({new_game.target_questions} questions).",
+        reference_id=new_game.pk,
+        expediteur=user,
+    )
+    return new_game
+
+
 def list_waiting_games():
     return (
         QuizGlobalGame.objects.filter(status=QuizGlobalGame.Status.WAITING, invited_player__isnull=True)

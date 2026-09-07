@@ -69,6 +69,7 @@ def _data_url_to_image_file(value: str | None, field_name: str) -> ContentFile |
 @strawberry.type
 class AuthPayload:
     access_token: str
+    refresh_token: str
     user_id: str
     refresh_token_set: bool
     utilisateur: UtilisateurType
@@ -148,9 +149,10 @@ def resolve_register(info: Info, input: RegisterInput) -> AuthPayload:
             ville.save(update_fields=["slug"])
 
     access = generate_access_token(user)
-    generate_refresh_token(user)
+    refresh = generate_refresh_token(user)
     return AuthPayload(
         access_token=access,
+        refresh_token=refresh,
         user_id=str(user.id),
         refresh_token_set=True,
         utilisateur=user,
@@ -164,9 +166,10 @@ def resolve_login(info: Info, email: str, password: str) -> AuthPayload:
     user.en_ligne = True
     user.save(update_fields=["en_ligne"])
     access = generate_access_token(user)
-    generate_refresh_token(user)
+    refresh = generate_refresh_token(user)
     return AuthPayload(
         access_token=access,
+        refresh_token=refresh,
         user_id=str(user.id),
         refresh_token_set=True,
         utilisateur=user,
@@ -189,9 +192,10 @@ def resolve_refresh(info: Info, refresh_token: str) -> AuthPayload:
     stored.save(update_fields=["revoque"])
     user = stored.utilisateur
     access = generate_access_token(user)
-    generate_refresh_token(user)
+    refresh = generate_refresh_token(user)
     return AuthPayload(
         access_token=access,
+        refresh_token=refresh,
         user_id=str(user.id),
         refresh_token_set=True,
         utilisateur=user,

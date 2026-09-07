@@ -155,3 +155,36 @@ def test_erreur_interne_masquee(client):
     # Token valide côté décodage mais utilisateur inexistant -> erreur générique.
     resp = _gql(client, "{ monPortefeuille { soldeTotal } }", token="token.invalide")
     assert resp["errors"][0]["extensions"]["code"] == "PERMISSION_DENIED"
+
+
+@pytest.mark.django_db
+def test_refresh_token_rotation_regenere_access(client):
+    """Garde le contrat du fix frontend : login expose refreshToken, qui permet
+    d'obtenir un nouvel accessToken sans mot de passe (rotation du refresh)."""
+    reg = _gql(
+        client,
+        'mutation { register(input: { email: "refresh@example.mg", pseudo: "RefreshUser", password: "MotDePasse1!" }) { accessToken refreshToken } }',
+    )
+    assert "errors" not in reg, reg
+    refresh_token = reg["data"]["register"]["refreshToken"]
+    assert refresh_token
+
+    # Le refresh token permet de récupérer un nouveau couple de tokens.
+    rot = _gql(
+        client,
+        f'mutation {{ refreshToken(refreshToken: "{refresh_token}") {{ accessToken refreshToken }} }}',
+    )
+    assert "errors" not in rot, rot
+    nouveau_access = rot["data"]["refreshToken"]["accessToken"]
+    assert nouveau_access and nouveau_access != reg["data"]["register"]["accessToken"]
+
+    # Le nouvel access token est utilisable sur une requête authentifiée.
+    profil = _gql(client, "{ profil { utilisateur { pseudo } } }", token=nouveau_access)
+    assert profil["data"]["profil"]["utilisateur"]["pseudo"] == "RefreshUser"
+
+    # Rotation : l'ancien refresh token est révoqué.
+    revenant = _gql(
+        client,
+        f'mutation {{ refreshToken(refreshToken: "{refresh_token}") {{ accessToken }} }}',
+    )
+    assert revenant["errors"][0]["extensions"]["code"] == "AUTH_REVOKED_REFRESH_TOKEN"

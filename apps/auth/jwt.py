@@ -7,7 +7,6 @@ from django.utils import timezone
 
 from apps.auth.models import RefreshToken
 
-
 def _payload(user, token_type: str, ttl: int):
     now = timezone.now()
     return {

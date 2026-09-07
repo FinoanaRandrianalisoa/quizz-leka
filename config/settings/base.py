@@ -6,9 +6,20 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 env = environ.Env(
     DEBUG=(bool, False),
     SECRET_KEY=(str, "unsafe-default-secret-key"),
-    ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1"]),
-    CORS_ALLOWED_ORIGINS=(list, ["http://localhost:3000"]),
-    DATABASE_URL=(str, "postgres://mahafeno:antso0201@postgresql-mahafeno.alwaysdata.net:5432/mahafeno_quizz"),
+    ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1", "quizz-leka.onrender.com", ".onrender.com"]),
+    CORS_ALLOWED_ORIGINS=(
+        list,
+        [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://localhost:8443",
+            "https://frontend-quizz-leka-hkq7.vercel.app",
+        ],
+    ),
+    DATABASE_URL=(
+        str,
+        "postgres://mahafeno:antso0201@postgresql-mahafeno.alwaysdata.net:5432/mahafeno_quizz",
+    ),
     REDIS_URL=(str, "redis://localhost:6379/0"),
     CELERY_BROKER_URL=(str, "redis://localhost:6379/1"),
 )
@@ -17,7 +28,14 @@ environ.Env.read_env(BASE_DIR / ".env")
 
 SECRET_KEY = env("SECRET_KEY")
 DEBUG = env("DEBUG")
-ALLOWED_HOSTS = env("ALLOWED_HOSTS")
+
+# fusionne les hôtes autorisés depuis l'environnement avec nos hôtes par défaut
+ALLOWED_HOSTS = list(
+    set(
+        env.list("ALLOWED_HOSTS", default=[])
+        + ["localhost", "127.0.0.1", "quizz-leka.onrender.com", ".onrender.com"]
+    )
+)
 
 INSTALLED_APPS = [
     "daphne",
@@ -44,8 +62,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",  # Doit impérativement être le premier middleware
     "django.middleware.security.SecurityMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -75,10 +93,11 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = "config.wsgi.application"
-
 DATABASES = {
-    "default": env.db("DATABASE_URL", default="postgres://postgres:postgres@localhost:5432/quizz")
+    "default": env.db(
+        "DATABASE_URL",
+        default="postgres://postgres:postgres@localhost:5432/quizz",
+    )
 }
 
 AUTH_USER_MODEL = "users.Utilisateur"
@@ -89,9 +108,16 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 AUTH_PASSWORD_VALIDATORS = [
-    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 8}},
-    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
-    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+    {
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {"min_length": 8},
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"
+    },
 ]
 
 PASSWORD_HASHERS = [
@@ -111,27 +137,62 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-DATA_UPLOAD_MAX_MEMORY_SIZE = env.int("DATA_UPLOAD_MAX_MEMORY_SIZE", default=5 * 1024 * 1024)
-FILE_UPLOAD_MAX_MEMORY_SIZE = env.int("FILE_UPLOAD_MAX_MEMORY_SIZE", default=5 * 1024 * 1024)
+DATA_UPLOAD_MAX_MEMORY_SIZE = env.int(
+    "DATA_UPLOAD_MAX_MEMORY_SIZE", default=5 * 1024 * 1024
+)
+FILE_UPLOAD_MAX_MEMORY_SIZE = env.int(
+    "FILE_UPLOAD_MAX_MEMORY_SIZE", default=5 * 1024 * 1024
+)
 
-# CORS
-CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS")
+# --- CORS & CSRF ---
+# Fusion des origines autorisées dans env + valeurs explicites
+RAW_CORS_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
+CORS_ALLOWED_ORIGINS = list(
+    set(
+        RAW_CORS_ORIGINS
+        + [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://localhost:8443",
+            "https://frontend-quizz-leka-hkq7.vercel.app",
+        ]
+    )
+)
+
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOW_HEADERS = [
-    "content-type",
-    "authorization",
-    "x-requested-with",
-    "accept",
-    "origin",
+
+# Expression régulière pour valider Vercel dynamiquement (Production + Previews)
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https:\/\/.*\.vercel\.app$",
 ]
+
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "content-type",
+    "dnt",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+]
+
 CORS_ALLOW_METHODS = [
+    "DELETE",
     "GET",
+    "OPTIONS",
+    "PATCH",
     "POST",
     "PUT",
-    "PATCH",
-    "DELETE",
-    "OPTIONS",
+]
+
+# Domaines de confiance pour les requêtes POST / CSRF
+CSRF_TRUSTED_ORIGINS = [
+    "https://frontend-quizz-leka-hkq7.vercel.app",
+    "https://*.vercel.app",
+    "https://quizz-leka.onrender.com",
 ]
 
 # Channels
@@ -155,7 +216,10 @@ CACHES = {
 CELERY_BROKER_URL = env("CELERY_BROKER_URL")
 CELERY_TASK_QUEUES = {
     "payments": {"exchange": "payments", "routing_key": "payments"},
-    "notifications": {"exchange": "notifications", "routing_key": "notifications"},
+    "notifications": {
+        "exchange": "notifications",
+        "routing_key": "notifications",
+    },
     "default": {"exchange": "default", "routing_key": "default"},
     "matches": {"exchange": "matches", "routing_key": "matches"},
 }
@@ -197,9 +261,13 @@ COMMISSION_DEMO_RATE = env.float("COMMISSION_DEMO_RATE", default=0.20)
 
 # PIN portefeuille (4 chiffres, distinct du mot de passe de connexion)
 WALLET_PIN_LENGTH = 4
-WALLET_PIN_UNLOCK_DURATION = env.int("WALLET_PIN_UNLOCK_DURATION", default=300)  # secondes
+WALLET_PIN_UNLOCK_DURATION = env.int(
+    "WALLET_PIN_UNLOCK_DURATION", default=300
+)  # secondes
 WALLET_PIN_MAX_ATTEMPTS = env.int("WALLET_PIN_MAX_ATTEMPTS", default=5)
-WALLET_PIN_LOCK_DURATION = env.int("WALLET_PIN_LOCK_DURATION", default=300)  # secondes
+WALLET_PIN_LOCK_DURATION = env.int(
+    "WALLET_PIN_LOCK_DURATION", default=300
+)  # secondes
 
 LOGGING = {
     "version": 1,

@@ -114,6 +114,6 @@ class ASGICORSMiddleware:
 application = ProtocolTypeRouter(
     {
         "http": ASGICORSMiddleware(django_asgi_app),
-        "websocket": JWTAuthMiddleware(URLRouter(websocket_urlpatterns)),
+        "websocket": URLRouter(websocket_urlpatterns),
     }
 )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 from datetime import timedelta
 from decimal import Decimal
@@ -9,6 +10,8 @@ from channels.layers import get_channel_layer
 from django.db import transaction
 from django.db.models import Count, Q
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 from apps.betting.models import Pari  # noqa: F401
 from apps.quiz_global.errors import (
@@ -505,6 +508,26 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
     _notify(game, "PLAYER_JOINED")
     _notify(game, "GAME_STARTED")
     _notify(game, "THEME_SELECTION_STARTED")
+    
+    # Notifier l'hôte via WebSocket que l'invité a rejoint
+    try:
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            "notifications",
+            {
+                "type": "quiz_global_invite_accepted",
+                "data": {
+                    "type": "quiz_global.invite_accepted",
+                    "game_id": game.pk,
+                    "host_id": game.players.filter(seat="A").first().player_id,
+                    "invite_id": user.pk,
+                    "invite_pseudo": user.pseudo,
+                },
+            },
+        )
+    except Exception as e:
+        logger.error(f"Erreur diffusion notification acceptation quiz global: {e}")
+    
     return game
 
 

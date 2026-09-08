@@ -269,3 +269,65 @@ def test_graphql_revanche_partie_quiz_global(client):
     assert payload["status"] == "THEME_SELECTION"
     assert payload["targetQuestions"] == 4
     assert payload["gameId"] != game_id
+
+
+@pytest.mark.django_db
+def test_mise_blocks_funds_and_settles_winner():
+    from decimal import Decimal
+
+    from apps.wallet.models import LedgerEntry, Portefeuille
+
+    a = _user("miseA@quiz.mg", "MiseAlice")
+    b = _user("miseB@quiz.mg", "MiseBob")
+    pf_a = Portefeuille.objects.get(utilisateur=a)
+    pf_b = Portefeuille.objects.get(utilisateur=b)
+    pf_a.solde_recharge = Decimal("1000")
+    pf_a.save(update_fields=["solde_recharge"])
+    pf_b.solde_recharge = Decimal("1000")
+    pf_b.save(update_fields=["solde_recharge"])
+    a.portefeuille.refresh_from_db()
+    b.portefeuille.refresh_from_db()
+
+    game = create_game(a, 4, mise=Decimal("100"))
+    pf_a.refresh_from_db()
+    assert pf_a.solde_bloque == Decimal("100")
+    assert pf_a.solde_recharge == Decimal("900")
+
+    game = join_game(b, game.pk, mise=Decimal("100"))
+    pf_b.refresh_from_db()
+    assert pf_b.solde_bloque == Decimal("100")
+
+    payload = serialize_game(game, a)
+    assert payload["mise"] == "100.00"
+    assert payload["miseEffective"] == "100.00"
+
+    scores = {"A": 0, "B": 0}
+    from apps.quiz_global import services
+
+    def settle(a_score, b_score):
+        scores["A"] = a_score
+        scores["B"] = b_score
+        services._finish_game(game, a_score, b_score, draw=(a_score == b_score))
+
+    settle(4, 2)
+    pf_a.refresh_from_db()
+    pf_b.refresh_from_db()
+    # Gagnant A : pot net (200 - 2×20% = 160) crédité, perdant B consomme 100.
+    assert pf_a.solde_gains == Decimal("160.00")
+    assert pf_a.solde_bloque == Decimal("0")
+    assert pf_b.solde_bloque == Decimal("0")
+    assert pf_b.solde_total == Decimal("900")
+
+    # Égalité → remboursement intégral des deux.
+    pf_a.solde_gains = Decimal("0")
+    pf_a.solde_recharge = Decimal("1000")
+    pf_a.save(update_fields=["solde_gains", "solde_recharge"])
+    a.portefeuille.refresh_from_db()
+    b.portefeuille.refresh_from_db()
+    game2 = create_game(a, 4, mise=Decimal("50"))
+    game2 = join_game(b, game2.pk, mise=Decimal("50"))
+    services._finish_game(game2, 2, 2, draw=True)
+    pf_a.refresh_from_db()
+    pf_b.refresh_from_db()
+    assert pf_a.solde_recharge == Decimal("1000")
+    assert pf_a.solde_bloque == Decimal("0")

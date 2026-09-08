@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 from datetime import timedelta
+from decimal import Decimal
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -9,6 +10,7 @@ from django.db import transaction
 from django.db.models import Count, Q
 from django.utils import timezone
 
+from apps.betting.models import Pari  # noqa: F401
 from apps.quiz_global.errors import (
     AnswerRejectedError,
     GameNotJoinableError,
@@ -27,12 +29,39 @@ from apps.quiz_global.models import (
 from apps.themes.models import Question, Reponse, Theme
 from apps.social.models import Notification, Publication
 from apps.social.services import envoyer_notification
+from apps.wallet import services as wallet_services
+from apps.wallet.models import LedgerEntry
 
 READING_DURATION = timedelta(seconds=10)
 ANSWERING_DURATION = timedelta(seconds=10)
 RESULT_DURATION = timedelta(seconds=5)
 TARGET_ALLOWED = {4, 8, 12}
 OPTION_LETTERS = ("A", "B", "C", "D")
+
+
+def _mise_reference(game_id: int, user_id: int) -> str:
+    return f"mise-quiz-global-{game_id}-{user_id}"
+
+
+def _valider_mise(montant, portefeuille) -> Decimal:
+    value = Decimal(str(montant or 0)).quantize(Decimal("0.01"))
+    if value < 0:
+        raise ValidationError("Montant de mise invalide.")
+    if value > portefeuille.solde_recharge:
+        from common.graphql.errors import InsufficientFundsError
+
+        raise InsufficientFundsError()
+    return value
+
+
+def mise_effective(game: QuizGlobalGame) -> Decimal:
+    """Mise effectivement engagée : MIN(mise hôte, mise invité)."""
+    if game.mise <= 0:
+        return Decimal("0")
+    invite = game.mise_proposee_invite if game.mise_proposee_invite is not None else game.mise
+    if invite <= 0:
+        return game.mise
+    return min(game.mise, invite)
 
 
 def _broadcast(game_id: int, payload: dict, user_id: int | None = None) -> None:
@@ -167,6 +196,8 @@ def serialize_game(game: QuizGlobalGame, viewer=None) -> dict:
         "phaseStartedAt": game.phase_started_at.isoformat() if game.phase_started_at else None,
         "phaseDeadline": game.phase_deadline.isoformat() if game.phase_deadline else None,
         "serverTime": now.isoformat(),
+        "mise": f"{game.mise:.2f}",
+        "miseEffective": f"{mise_effective(game):.2f}",
         "themes": theme_availability(game) if game.status == QuizGlobalGame.Status.THEME_SELECTION else [],
         "playerA": None
         if player_a is None
@@ -269,7 +300,7 @@ def _notify(game: QuizGlobalGame, event: str, extra: dict | None = None) -> None
 
 
 @transaction.atomic
-def create_game(user, target_questions: int, invite_id: int | None = None) -> QuizGlobalGame:
+def create_game(user, target_questions: int, invite_id: int | None = None, mise: Decimal | None = None) -> QuizGlobalGame:
     if target_questions not in TARGET_ALLOWED:
         raise ValidationError("Le nombre de questions doit être 4, 8 ou 12.")
     invited = None
@@ -279,19 +310,32 @@ def create_game(user, target_questions: int, invite_id: int | None = None) -> Qu
         invited = Utilisateur.objects.filter(pk=invite_id).first()
         if invited is None or invited.pk == user.pk:
             raise ValidationError("Adversaire invalide.")
+    if not hasattr(user, "portefeuille"):
+        raise ValidationError("Portefeuille introuvable.")
+    mise = _valider_mise(mise, user.portefeuille)
     game = QuizGlobalGame.objects.create(
         target_questions=target_questions,
         invited_player=invited,
+        mise=mise,
         status=QuizGlobalGame.Status.WAITING,
     )
     QuizGlobalPlayer.objects.create(game=game, player=user, seat="A")
+    if mise > 0:
+        wallet_services.bloquer_mise(
+            user.portefeuille,
+            mise,
+            reference=_mise_reference(game.pk, user.pk),
+            metadata={"game": game.pk, "role": "hote"},
+            idempotency_key=f"reserve:{game.pk}:{user.pk}",
+        )
     _notify(game, "GAME_CREATED")
     if invited is not None:
         envoyer_notification(
             invited,
             Notification.Type.DEFI_RECU,
             "Invitation Quizz Global",
-            f"{user.pseudo} vous invite à un duel Quizz Global de {target_questions} questions.",
+            f"{user.pseudo} vous invite à un duel Quizz Global de {target_questions} questions"
+            + (f" (mise {mise} Ar)." if mise > 0 else "."),
             reference_id=game.pk,
             expediteur=user,
         )
@@ -304,7 +348,10 @@ def publish_open_game(user, game: QuizGlobalGame) -> Publication:
     """Publie un salon ouvert (sans invitation ciblée) dans le fil d'actualité."""
     return Publication.objects.create(
         auteur=user,
-        texte=f"🎯 {user.pseudo} ouvre un salon Quizz Global ({game.target_questions} questions). Rejoignez-le !",
+        texte=(
+            f"🎯 {user.pseudo} ouvre un salon Quizz Global ({game.target_questions} questions)."
+            + (f" Mise {game.mise} Ar." if game.mise > 0 else " Rejoignez-le !")
+        ),
         lien_type="quiz_global",
         reference_id=game.pk,
     )
@@ -327,6 +374,17 @@ def annuler_game(user, game_id: int) -> bool:
     game.invited_player = None
     game.save(update_fields=["status", "invited_player"])
     _notify(game, "GAME_CANCELLED")
+    if game.mise > 0:
+        host_player = game.players.filter(seat="A").select_related("player__portefeuille").first()
+        if host_player and hasattr(host_player.player, "portefeuille"):
+            wallet_services.liberer_mise(
+                host_player.player.portefeuille,
+                game.mise,
+                type_=LedgerEntry.Type.REMBOURSEMENT,
+                reference=f"remboursement-quiz-global-{game.pk}-{host_player.player.pk}",
+                metadata={"game": game.pk},
+                idempotency_key=f"annulation:{game.pk}:{host_player.player.pk}",
+            )
     if invited is not None and invited.pk != user.pk:
         envoyer_notification(
             invited,
@@ -351,6 +409,15 @@ def refuser_invitation(user, game_id: int) -> bool:
     game.invited_player = None
     game.save(update_fields=["status", "invited_player"])
     _notify(game, "INVITATION_REFUSED")
+    if game.mise > 0 and host is not None and hasattr(host.player, "portefeuille"):
+        wallet_services.liberer_mise(
+            host.player.portefeuille,
+            game.mise,
+            type_=LedgerEntry.Type.REMBOURSEMENT,
+            reference=f"refus-quiz-global-{game.pk}-{host.player.pk}",
+            metadata={"game": game.pk},
+            idempotency_key=f"refus:{game.pk}:{host.player.pk}",
+        )
     if host is not None:
         envoyer_notification(
             host.player,
@@ -364,7 +431,7 @@ def refuser_invitation(user, game_id: int) -> bool:
 
 
 @transaction.atomic
-def join_game(user, game_id: int) -> QuizGlobalGame:
+def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame:
     game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
     if game is None:
         raise MatchNotFoundError()
@@ -376,6 +443,15 @@ def join_game(user, game_id: int) -> QuizGlobalGame:
         raise GameNotJoinableError("Cette partie est réservée à un autre joueur.")
     if game.players.count() >= 2:
         raise GameNotJoinableError()
+    if not hasattr(user, "portefeuille"):
+        raise ValidationError("Portefeuille introuvable.")
+
+    eff = Decimal("0")
+    proposition = Decimal("0")
+    if game.mise > 0:
+        proposition = game.mise if mise is None else _valider_mise(mise, user.portefeuille)
+    game.mise_proposee_invite = proposition
+
     QuizGlobalPlayer.objects.create(game=game, player=user, seat="B")
     now = timezone.now()
     game.status = QuizGlobalGame.Status.THEME_SELECTION
@@ -384,6 +460,48 @@ def join_game(user, game_id: int) -> QuizGlobalGame:
     game.phase_deadline = None
     game.active_seat = "A"
     game.save()
+
+    if game.mise > 0:
+        wallet_services.bloquer_mise(
+            user.portefeuille,
+            proposition,
+            reference=_mise_reference(game.pk, user.pk),
+            metadata={"game": game.pk, "role": "invite"},
+            idempotency_key=f"reserve:{game.pk}:{user.pk}",
+        )
+        eff = min(game.mise, proposition) if proposition > 0 else game.mise
+        host_player = game.players.filter(seat="A").select_related("player__portefeuille").first()
+        surplus_hote = game.mise - eff
+        if surplus_hote > 0 and host_player and hasattr(host_player.player, "portefeuille"):
+            wallet_services.liberer_mise(
+                host_player.player.portefeuille,
+                surplus_hote,
+                reference=f"surplus-quiz-global-{game.pk}-{host_player.player.pk}",
+                metadata={"game": game.pk, "role": "hote", "type_de_surplus": "mise"},
+                idempotency_key=f"surplus:{game.pk}:{host_player.player.pk}",
+            )
+        surplus_invite = proposition - eff
+        if surplus_invite > 0:
+            wallet_services.liberer_mise(
+                user.portefeuille,
+                surplus_invite,
+                reference=f"surplus-quiz-global-{game.pk}-{user.pk}",
+                metadata={"game": game.pk, "role": "invite", "type_de_surplus": "mise"},
+                idempotency_key=f"surplus:{game.pk}:{user.pk}",
+            )
+        wallet_services.engager_mise(
+            host_player.player.portefeuille if host_player else user.portefeuille,
+            eff,
+            reference=f"engage-quiz-global-{game.pk}-hote",
+            metadata={"game": game.pk},
+        )
+        wallet_services.engager_mise(
+            user.portefeuille,
+            eff,
+            reference=f"engage-quiz-global-{game.pk}-{user.pk}",
+            metadata={"game": game.pk},
+        )
+
     _notify(game, "PLAYER_JOINED")
     _notify(game, "GAME_STARTED")
     _notify(game, "THEME_SELECTION_STARTED")
@@ -575,6 +693,32 @@ def _finish_game(game: QuizGlobalGame, score_a: int, score_b: int, draw: bool = 
     game.status = QuizGlobalGame.Status.FINISHED
     game.finished_at = timezone.now()
     game.phase_deadline = None
+
+    if game.mise > 0:
+        eff = mise_effective(game)
+        if not draw and winner is not None:
+            loser_player = players["B"].player if winner.pk == players["A"].player_id else players["A"].player
+            gagnant_pf = next((p.portefeuille for p in (players["A"].player, players["B"].player) if p.pk == winner.pk and hasattr(p, "portefeuille")), None)
+            perdant_pf = next((p.portefeuille for p in (players["A"].player, players["B"].player) if p.pk == loser_player.pk and hasattr(p, "portefeuille")), None)
+            if gagnant_pf and perdant_pf:
+                wallet_services.GameSettlementService.regler_duel(
+                    portefeuille_gagnant=gagnant_pf,
+                    portefeuille_perdant=perdant_pf,
+                    mise_effective=eff,
+                    reference=f"quiz-global-{game.pk}",
+                    metadata={"game": game.pk},
+                )
+        else:
+            for pl in (players.get("A"), players.get("B")):
+                if pl is not None and hasattr(pl.player, "portefeuille"):
+                    wallet_services.liberer_mise(
+                        pl.player.portefeuille,
+                        eff,
+                        type_=LedgerEntry.Type.REMBOURSEMENT,
+                        reference=f"egalite-quiz-global-{game.pk}-{pl.player.pk}",
+                        metadata={"game": game.pk},
+                        idempotency_key=f"settle:{game.pk}:egalite:{pl.player.pk}",
+                    )
     game.save()
     _notify(game, "GAME_FINISHED")
 
@@ -615,6 +759,7 @@ def revanche_game(user, game_id: int, target_questions: int | None = None) -> Qu
     now = timezone.now()
     new_game = QuizGlobalGame.objects.create(
         target_questions=target_questions or game.target_questions,
+        mise=game.mise,
         status=QuizGlobalGame.Status.THEME_SELECTION,
         active_seat="A",
         started_at=now,
@@ -622,6 +767,37 @@ def revanche_game(user, game_id: int, target_questions: int | None = None) -> Qu
     )
     QuizGlobalPlayer.objects.create(game=new_game, player=user, seat="A")
     QuizGlobalPlayer.objects.create(game=new_game, player=opponent, seat="B")
+    if new_game.mise > 0:
+        if not hasattr(user, "portefeuille"):
+            raise ValidationError("Portefeuille introuvable.")
+        wallet_services.bloquer_mise(
+            user.portefeuille,
+            new_game.mise,
+            reference=_mise_reference(new_game.pk, user.pk),
+            metadata={"game": new_game.pk, "role": "hote"},
+            idempotency_key=f"reserve:{new_game.pk}:{user.pk}",
+        )
+        wallet_services.bloquer_mise(
+            opponent.portefeuille,
+            new_game.mise,
+            reference=_mise_reference(new_game.pk, opponent.pk),
+            metadata={"game": new_game.pk, "role": "invite"},
+            idempotency_key=f"reserve:{new_game.pk}:{opponent.pk}",
+        )
+        eff = min(new_game.mise, new_game.mise) if new_game.mise > 0 else 0
+        if eff > 0:
+            wallet_services.engager_mise(
+                user.portefeuille,
+                eff,
+                reference=f"engage-quiz-global-{new_game.pk}-hote",
+                metadata={"game": new_game.pk},
+            )
+            wallet_services.engager_mise(
+                opponent.portefeuille,
+                eff,
+                reference=f"engage-quiz-global-{new_game.pk}-invite",
+                metadata={"game": new_game.pk},
+            )
     _notify(new_game, "GAME_CREATED")
     _notify(new_game, "GAME_STARTED")
     _notify(new_game, "THEME_SELECTION_STARTED")

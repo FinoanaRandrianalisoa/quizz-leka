@@ -1,4 +1,5 @@
 import strawberry
+from decimal import Decimal
 from strawberry.types import Info
 
 from apps.quiz_global import services
@@ -15,15 +16,15 @@ class QuizGlobalAnswerResult:
 @strawberry.type
 class QuizGlobalMutation:
     @strawberry.mutation
-    def creer_partie_quiz_global(self, info: Info, target_questions: int, invite_id: int | None = None) -> QuizGlobalState:
+    def creer_partie_quiz_global(self, info: Info, target_questions: int, invite_id: int | None = None, mise: Decimal = Decimal("0")) -> QuizGlobalState:
         user = get_current_user(info)
-        game = services.create_game(user, target_questions, invite_id)
+        game = services.create_game(user, target_questions, invite_id, mise)
         return to_state(game, user)
 
     @strawberry.mutation
-    def rejoindre_partie_quiz_global(self, info: Info, game_id: int) -> QuizGlobalState:
+    def rejoindre_partie_quiz_global(self, info: Info, game_id: int, mise: Decimal | None = None) -> QuizGlobalState:
         user = get_current_user(info)
-        game = services.join_game(user, game_id)
+        game = services.join_game(user, game_id, mise)
         return to_state(game, user)
 
     @strawberry.mutation

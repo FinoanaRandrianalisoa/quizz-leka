@@ -18,6 +18,8 @@ class QuizGlobalGame(TimeStampedModel):
 
     status = models.CharField(max_length=40, choices=Status.choices, default=Status.WAITING)
     target_questions = models.PositiveSmallIntegerField()
+    mise = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    mise_proposee_invite = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
     current_turn = models.PositiveIntegerField(default=0)
     active_seat = models.CharField(max_length=1, default="A")
     invited_player = models.ForeignKey(

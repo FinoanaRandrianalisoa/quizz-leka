@@ -64,6 +64,8 @@ class QuizGlobalState:
     current_turn: int
     active_seat: str
     is_tie_break: bool
+    mise: str
+    mise_effective: str
     phase_started_at: str | None
     phase_deadline: str | None
     server_time: str
@@ -123,6 +125,8 @@ def state_from_payload(payload: dict) -> QuizGlobalState:
         current_turn=payload["currentTurn"],
         active_seat=payload["activeSeat"],
         is_tie_break=payload["isTieBreak"],
+        mise=payload.get("mise", "0.00"),
+        mise_effective=payload.get("miseEffective", "0.00"),
         phase_started_at=payload.get("phaseStartedAt"),
         phase_deadline=payload.get("phaseDeadline"),
         server_time=payload["serverTime"],

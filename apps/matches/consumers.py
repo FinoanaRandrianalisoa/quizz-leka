@@ -5,6 +5,10 @@ class MatchConsumer(AsyncJsonWebsocketConsumer):
     """WebSocket du match — diffusion temps réel des phases (RG-GAM)."""
 
     async def connect(self):
+        user = self.scope.get("user")
+        if not user or getattr(user, "is_anonymous", True):
+            await self.close()
+            return
         self.match_id = self.scope["url_route"]["kwargs"].get("match_id")
         self.match_group = f"match_{self.match_id}"
         await self.channel_layer.group_add(self.match_group, self.channel_name)

@@ -9,6 +9,7 @@ websocket_urlpatterns = [
     path("ws/parties/", PartiesConsumer.as_asgi()),
     path("ws/rps/<str:match_id>/", RpsConsumer.as_asgi()),
     path("ws/penalty/<str:match_id>/", PenaltyConsumer.as_asgi()),
+    path("ws/match/<int:match_id>/", MatchConsumer.as_asgi()),
     path("ws/ville/<str:ville_slug>/", CityChatConsumer.as_asgi()),
     path("ws/notifications/", NotificationConsumer.as_asgi()),
 ]

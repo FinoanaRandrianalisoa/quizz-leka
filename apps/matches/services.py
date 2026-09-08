@@ -1092,6 +1092,26 @@ def accepter_defi_penalty(utilisateur, challenge_id: str) -> dict:
     del PENALTY_CHALLENGES[challenge_id]
     
     _broadcast_penalty_match(match_id, match)
+    
+    # Notifier l'hôte via WebSocket que le défi a été accepté
+    try:
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            "notifications",
+            {
+                "type": "penalty_challenge_accepted",
+                "data": {
+                    "type": "penalty.challenge_accepted",
+                    "match_id": match_id,
+                    "hote_id": challenge["hote_id"],
+                    "invite_id": challenge["invite_id"],
+                    "invite_pseudo": challenge["invite_pseudo"],
+                },
+            },
+        )
+    except Exception as e:
+        logger.error(f"Erreur diffusion notification acceptation penalty: {e}")
+    
     return match
 
 

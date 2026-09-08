@@ -276,6 +276,8 @@ def creer_partie(utilisateur, theme_id: int, mise, score_cible: int = 8, type_je
             score_cible=score_cible,
             joueur_hote=utilisateur,
         )
+        # Créer automatiquement une participation pour l'hôte
+        Participation.objects.create(match=match, utilisateur=utilisateur, score_final=0)
         if match.mise > 0:
             wallet_services.bloquer_mise(
                 utilisateur.portefeuille,

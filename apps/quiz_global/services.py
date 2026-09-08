@@ -512,19 +512,22 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
     # Notifier l'hôte via WebSocket que l'invité a rejoint
     try:
         channel_layer = get_channel_layer()
-        async_to_sync(channel_layer.group_send)(
-            "notifications",
-            {
-                "type": "quiz_global_invite_accepted",
-                "data": {
-                    "type": "quiz_global.invite_accepted",
-                    "game_id": game.pk,
-                    "host_id": game.players.filter(seat="A").first().player_id,
-                    "invite_id": user.pk,
-                    "invite_pseudo": user.pseudo,
+        host_player = game.players.filter(seat="A").select_related("player").first()
+        if host_player:
+            async_to_sync(channel_layer.group_send)(
+                f"notifications_{host_player.player_id}",
+                {
+                    "type": "notify",
+                    "data": {
+                        "type": "quiz_global.invite_accepted",
+                        "game_id": game.pk,
+                        "host_id": host_player.player_id,
+                        "invite_id": user.pk,
+                        "invite_pseudo": user.pseudo,
+                    },
                 },
-            },
-        )
+            )
+            logger.info(f"Notification acceptation quiz global envoyée à l'hôte {host_player.player_id}")
     except Exception as e:
         logger.error(f"Erreur diffusion notification acceptation quiz global: {e}")
     

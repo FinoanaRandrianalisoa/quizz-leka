@@ -651,7 +651,7 @@ def inviter_joueur_course_lapin(utilisateur, match_id: int, invite_id: int) -> M
 def accepter_invitation_course_lapin(utilisateur, match_id: int) -> Match:
     with transaction.atomic():
         try:
-            match = Match.objects.select_for_update().select_related("theme", "joueur_hote", "joueur_invite").get(pk=match_id)
+            match = Match.objects.select_for_update(of=("self",)).select_related("theme", "joueur_hote", "joueur_invite").get(pk=match_id)
         except Match.DoesNotExist:
             raise MatchNotFoundError()
 

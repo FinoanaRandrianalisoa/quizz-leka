@@ -14,8 +14,19 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 from apps.betting.models import Pari  # noqa: F401
+from apps.quiz_global.active_game_service import (
+    accept_invitation,
+    cancel_invitations,
+    expire_invitations,
+    get_active_game,
+    has_active_game,
+    release_players,
+    reserve_player,
+)
+from apps.quiz_global.constants import INACTIVE_STATUSES
 from apps.quiz_global.errors import (
     AnswerRejectedError,
+    GameCancelledError,
     GameFullError,
     GameNotJoinableError,
     MatchNotFoundError,
@@ -29,6 +40,7 @@ from apps.quiz_global.errors import (
 from apps.quiz_global.models import (
     QuizGlobalGame,
     QuizGlobalGameQuestion,
+    QuizGlobalInvitation,
     QuizGlobalPlayer,
     QuizGlobalPlayerAnswer,
 )
@@ -43,11 +55,38 @@ ANSWERING_DURATION = timedelta(seconds=10)
 RESULT_DURATION = timedelta(seconds=5)
 TARGET_ALLOWED = {4, 8, 12}
 OPTION_LETTERS = ("A", "B", "C", "D")
-WAITING_EXPIRY_SECONDS = 300  # 5 minutes : salon auto-annulé si personne ne rejoint
+WAITING_EXPIRY_SECONDS = 30 * 60  # 30 minutes : salon qui ne rejoint personne -> EXPIRED
+ABANDON_TIMEOUT_SECONDS = 120  # 2 minutes sans progression de phase -> ABANDONED
 
 
 def _mise_reference(game_id: int, user_id: int) -> str:
     return f"mise-quiz-global-{game_id}-{user_id}"
+
+
+def _sync_invitation_row(game: QuizGlobalGame, invite_id: int | None, sender) -> None:
+    """Crée une ligne QuizGlobalInvitation pour l'invitation ciblée (migration progressive)."""
+    if not invite_id or invite_id == sender.pk:
+        return
+    QuizGlobalInvitation.objects.get_or_create(
+        game=game,
+        receiver_id=invite_id,
+        defaults={"sender": sender},
+    )
+
+
+def _invalidate_stale_invitations(game: QuizGlobalGame) -> None:
+    """Invalide les invitations PENDING d'un salon à l'état inactif."""
+    QuizGlobalInvitation.objects.filter(game=game, status=QuizGlobalInvitation.Status.PENDING).update(
+        status=QuizGlobalInvitation.Status.EXPIRED,
+    )
+
+
+def _expire_peers(game: QuizGlobalGame, accepted_user) -> None:
+    """Expire toutes les invitations PENDING du salon sauf celle du joueur accepté."""
+    QuizGlobalInvitation.objects.filter(
+        game=game,
+        status=QuizGlobalInvitation.Status.PENDING,
+    ).exclude(receiver=accepted_user).update(status=QuizGlobalInvitation.Status.EXPIRED)
 
 
 def _valider_mise(montant, portefeuille) -> Decimal:
@@ -199,7 +238,7 @@ def serialize_game(game: QuizGlobalGame, viewer=None) -> dict:
         "targetQuestions": game.target_questions,
         "currentTurn": game.current_turn,
         "activeSeat": game.active_seat,
-        "isTieBreak": game.status == QuizGlobalGame.Status.TIE_BREAK or bool(gq and gq.is_tie_break and not gq.finished_at),
+        "isTieBreak": game.status == QuizGlobalGame.Status.TIE_BREAK_THEME or bool(gq and gq.is_tie_break and not gq.finished_at),
         "phaseStartedAt": game.phase_started_at.isoformat() if game.phase_started_at else None,
         "phaseDeadline": game.phase_deadline.isoformat() if game.phase_deadline else None,
         "serverTime": now.isoformat(),
@@ -318,21 +357,11 @@ def create_game(user, target_questions: int, invite_id: int | None = None, mise:
         invited = Utilisateur.objects.filter(pk=invite_id).first()
         if invited is None or invited.pk == user.pk:
             raise ValidationError("Adversaire invalide.")
-    # Un joueur ne peut pas créer de partie s'il est déjà dans une partie active
-    active_statuses = [
-        QuizGlobalGame.Status.WAITING,
-        QuizGlobalGame.Status.THEME_SELECTION,
-        QuizGlobalGame.Status.QUESTION_READING,
-        QuizGlobalGame.Status.ANSWERING,
-        QuizGlobalGame.Status.QUESTION_FINISHED,
-        QuizGlobalGame.Status.TIE_BREAK,
-    ]
-    already_active = QuizGlobalGame.objects.filter(
-        players__player=user,
-        status__in=active_statuses,
-    ).exists()
-    if already_active:
-        raise PlayerAlreadyInGameError("Vous êtes déjà engagé dans une autre partie. Terminez-la d'abord.")
+    # ── Une seule partie réellement active par joueur ──
+    # Le verrou est la table ActivePlayer (OneToOne) : interroger l'historique
+    # (FINISHED/CANCELLED/EXPIRED/ABANDONED…) ne doit JAMAIS empêcher de créer.
+    if has_active_game(user):
+        raise PlayerAlreadyInGameError("Vous avez déjà une partie active. Terminez-la ou annulez-la d'abord.")
     if not hasattr(user, "portefeuille"):
         raise ValidationError("Portefeuille introuvable.")
     mise = _valider_mise(mise, user.portefeuille)
@@ -343,6 +372,8 @@ def create_game(user, target_questions: int, invite_id: int | None = None, mise:
         status=QuizGlobalGame.Status.WAITING,
     )
     QuizGlobalPlayer.objects.create(game=game, player=user, seat="A")
+    reserve_player(user, game)
+    _sync_invitation_row(game, invite_id, user)
     if mise > 0:
         wallet_services.bloquer_mise(
             user.portefeuille,
@@ -399,23 +430,31 @@ def _liberer_mise_hote(game: QuizGlobalGame, motif: str = "annulation") -> None:
 
 @transaction.atomic
 def _expirer_salon(game: QuizGlobalGame) -> None:
-    """Annule un salon WAITING (expiration automatique). Row déjà verrouillée."""
+    """Expire un salon WAITING (expiration automatique). Row déjà verrouillée.
+
+    Le statut passe à EXPIRED (inactif) : le joueur est libéré immédiatement
+    et peut créer/rejoindre une nouvelle partie.
+    """
     if game.status != QuizGlobalGame.Status.WAITING:
         return
     invited = game.invited_player
     host = game.players.filter(seat="A").select_related("player").first()
-    game.status = QuizGlobalGame.Status.CANCELLED
+    validate_transition(game.status, QuizGlobalGame.Status.EXPIRED)
+    game.status = QuizGlobalGame.Status.EXPIRED
+    game.expired_at = timezone.now()
     game.invited_player = None
-    game.save(update_fields=["status", "invited_player"])
+    game.save(update_fields=["status", "expired_at", "invited_player"])
     _liberer_mise_hote(game, motif="expiration")
-    _notify(game, "GAME_CANCELLED")
+    _invalidate_stale_invitations(game)
+    release_players(game)
+    _notify(game, "GAME_EXPIRED")
     if invited is not None:
         envoyer_notification(
             invited,
             Notification.Type.SYSTEME,
-            "Salon Quizz Global annulé",
-            f"L'invitation de {host.player.pseudo if host else 'l’hôte'} est annulée : "
-            f"personne n'a rejoint la partie en 5 minutes.",
+            "Salon Quizz Global expiré",
+            f"L'invitation de {host.player.pseudo if host else 'l’hôte'} a expiré : "
+            f"personne n'a rejoint la partie dans les temps.",
             reference_id=game.pk,
             expediteur=host.player if host else None,
         )
@@ -423,10 +462,11 @@ def _expirer_salon(game: QuizGlobalGame) -> None:
 
 @transaction.atomic
 def expirer_parties_en_attente(expiration_secondes: int = WAITING_EXPIRY_SECONDS) -> int:
-    """Annule automatiquement les salons WAITING plus vieux que `expiration_secondes`.
+    """Expire automatiquement les salons WAITING plus vieux que `expiration_secondes`.
 
+    Le statut devient EXPIRED (inactif) : le joueur est libéré immédiatement.
     Appelé périodiquement (Celery beat) et paresseusement (list/get) pour garantir
-    qu'aucun salon ne reste bloquant plus de 5 minutes.
+    qu'aucun salon ne reste bloquant plus longtemps que la durée d'attente.
     """
     cutoff = timezone.now() - timedelta(seconds=expiration_secondes)
     expired_ids = list(
@@ -438,8 +478,46 @@ def expirer_parties_en_attente(expiration_secondes: int = WAITING_EXPIRY_SECONDS
     for game_id in expired_ids:
         game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
         _expirer_salon(game)
-    logger.info("Expiration salons Quizz Global : %d partie(s) annulée(s)", len(expired_ids))
+    logger.info("Expiration salons Quizz Global : %d partie(s) expirée(s)", len(expired_ids))
     return len(expired_ids)
+
+
+@transaction.atomic
+def abandonner_parties_bloquees(grace_secondes: int = ABANDON_TIMEOUT_SECONDS) -> int:
+    """Passe à ABANDONED les parties bloquées sans progression de phase.
+
+    Une partie dont la `phase_deadline` est dépassée depuis longtemps (et qui
+    n'a donc pas avancé) indique une déconnexion définitive d'un joueur : à
+    partir de ce moment elle est INACTIVE et libère les deux joueurs.
+    """
+    cutoff = timezone.now() - timedelta(seconds=grace_secondes)
+    stuck_ids = list(
+        QuizGlobalGame.objects.filter(
+            status__in=[
+                QuizGlobalGame.Status.QUESTION_READING,
+                QuizGlobalGame.Status.ANSWERING,
+                QuizGlobalGame.Status.QUESTION_FINISHED,
+                QuizGlobalGame.Status.TIE_BREAK_THEME,
+            ],
+            phase_deadline__isnull=False,
+            phase_deadline__lt=cutoff,
+            abandoned_at__isnull=True,
+        ).values_list("pk", flat=True)
+    )
+    for game_id in stuck_ids:
+        game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
+        if game is None:
+            continue
+        validate_transition(game.status, QuizGlobalGame.Status.ABANDONED)
+        game.status = QuizGlobalGame.Status.ABANDONED
+        game.abandoned_at = timezone.now()
+        game.phase_deadline = None
+        game.save(update_fields=["status", "abandoned_at", "phase_deadline"])
+        _invalidate_stale_invitations(game)
+        release_players(game)
+        _notify(game, "GAME_ABANDONED")
+    logger.info("Abandon des parties bloquées : %d partie(s)", len(stuck_ids))
+    return len(stuck_ids)
 
 
 @transaction.atomic
@@ -458,6 +536,8 @@ def annuler_game(user, game_id: int) -> bool:
     game.invited_player = None
     game.save(update_fields=["status", "invited_player"])
     _liberer_mise_hote(game, motif="annulation")
+    cancel_invitations(game)
+    release_players(game)
     _notify(game, "GAME_CANCELLED")
     if invited is not None and invited.pk != user.pk:
         envoyer_notification(
@@ -484,6 +564,8 @@ def refuser_invitation(user, game_id: int) -> bool:
     game.invited_player = None
     game.save(update_fields=["status", "invited_player"])
     _liberer_mise_hote(game, motif="refus")
+    cancel_invitations(game)
+    release_players(game)
     _notify(game, "INVITATION_REFUSED")
     if host is not None:
         envoyer_notification(
@@ -544,44 +626,24 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
 
         # ── Vérification de la machine d'états ──
         if game.status != QuizGlobalGame.Status.WAITING:
-            if game.status == QuizGlobalGame.Status.CANCELLED:
-                from apps.quiz_global.errors import GameCancelledError
+            if game.status in (
+                QuizGlobalGame.Status.CANCELLED,
+                QuizGlobalGame.Status.EXPIRED,
+            ):
                 raise GameCancelledError()
             raise GameFullError()
 
         # ── Anti-double-acceptation cross-game ──
         # Un joueur ne peut pas être dans deux parties actives simultanément.
-        active_statuses = [
-            QuizGlobalGame.Status.WAITING,
-            QuizGlobalGame.Status.THEME_SELECTION,
-            QuizGlobalGame.Status.QUESTION_READING,
-            QuizGlobalGame.Status.ANSWERING,
-            QuizGlobalGame.Status.QUESTION_FINISHED,
-            QuizGlobalGame.Status.TIE_BREAK,
-        ]
-        already_active = (
-            QuizGlobalGame.objects.filter(
-                players__player=user,
-                status__in=active_statuses,
-            )
-            .exclude(pk=game_id)
-            .exists()
-        )
-        if already_active:
+        # Le verrou est la table ActivePlayer (OneToOne) : AUCUNE requête sur
+        # l'historique (FINISHED/CANCELLED/EXPIRED/ABANDONED) n'entre en compte.
+        if has_active_game(user, exclude_game_id=game.pk):
             raise PlayerAlreadyInGameError()
 
         # ── Idem pour l'hôte : il ne doit pas déjà jouer un autre duel ──
         # A ne peut pas créer game1→B et game2→C puis jouer les deux à la fois.
         host = game.players.filter(seat="A").select_related("player").first()
-        host_already_active = (
-            QuizGlobalGame.objects.filter(
-                players__player=host.player if host else None,
-                status__in=active_statuses,
-            )
-            .exclude(pk=game_id)
-            .exists()
-        )
-        if host_already_active:
+        if host is not None and has_active_game(host.player, exclude_game_id=game.pk):
             raise PlayerAlreadyInGameError(
                 "L'hôte est déjà engagé dans une autre partie Quizz Global."
             )
@@ -609,8 +671,19 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
             proposition = game.mise if mise is None else _valider_mise(mise, user.portefeuille)
         game.mise_proposee_invite = proposition
 
-        # ── Création du playerB + transition atomique ──
+        # ── Création du playerB + réserve ActivePlayer + transition atomique ──
         QuizGlobalPlayer.objects.create(game=game, player=user, seat="B")
+        reserve_player(user, game)
+
+        # ── Invitations : celle de B est acceptée, les autres deviennent EXPIRED ──
+        host_p = game.players.filter(seat="A").first()
+        inv = QuizGlobalInvitation.objects.filter(game=game, receiver=user).first()
+        if inv is None:
+            _sync_invitation_row(game, user.pk, host_p.player if host_p else None)
+            inv = QuizGlobalInvitation.objects.filter(game=game, receiver=user).first()
+        if inv is not None:
+            accept_invitation(inv)
+        _expire_peers(game, user)
 
         # Appliquer la transition via la machine d'états
         validate_transition(game.status, QuizGlobalGame.Status.THEME_SELECTION)
@@ -854,8 +927,8 @@ def _advance_after_result(game: QuizGlobalGame) -> None:
         return
 
     if score_a == score_b:
-        validate_transition(game.status, QuizGlobalGame.Status.TIE_BREAK)
-        game.status = QuizGlobalGame.Status.TIE_BREAK
+        validate_transition(game.status, QuizGlobalGame.Status.TIE_BREAK_THEME)
+        game.status = QuizGlobalGame.Status.TIE_BREAK_THEME
         game.save()
         _notify(game, "TIE_BREAK_STARTED")
         try:
@@ -911,6 +984,8 @@ def _finish_game(game: QuizGlobalGame, score_a: int, score_b: int, draw: bool = 
                         idempotency_key=f"settle:{game.pk}:egalite:{pl.player.pk}",
                     )
     game.save()
+    _invalidate_stale_invitations(game)
+    release_players(game)
     _notify(game, "GAME_FINISHED")
 
 
@@ -939,6 +1014,8 @@ def revanche_game(user, game_id: int, target_questions: int | None = None) -> Qu
         raise MatchNotFoundError()
     if game.status != QuizGlobalGame.Status.FINISHED:
         raise QuizGlobalError("Seules les parties terminées peuvent avoir une revanche.")
+    # La partie d'origine étant FINISHED, ses joueurs sont libérés pour la revanche.
+    release_players(game)
     players = _player_map(game)
     if user.pk not in {p.player_id for p in players.values()}:
         raise QuizGlobalError("Vous ne participez pas à cette partie.")
@@ -947,6 +1024,13 @@ def revanche_game(user, game_id: int, target_questions: int | None = None) -> Qu
         raise QuizGlobalError("Aucun adversaire disponible pour une revanche.")
     if target_questions is not None and target_questions not in TARGET_ALLOWED:
         raise ValidationError("Le nombre de questions doit être 4, 8 ou 12.")
+    # ── Une seule partie réellement active par joueur ──
+    # La partie d'origine est FINISHED : ses joueurs ont déjà été libérés.
+    # On vérifie qu'aucun des deux n'est engagé ailleurs avant de réserver.
+    for p in (user, opponent):
+        active = get_active_game(p, exclude_game_id=game.pk)
+        if active is not None:
+            raise QuizGlobalError("Un des deux joueurs a déjà une autre partie active.")
     now = timezone.now()
     new_game = QuizGlobalGame.objects.create(
         target_questions=target_questions or game.target_questions,
@@ -958,6 +1042,8 @@ def revanche_game(user, game_id: int, target_questions: int | None = None) -> Qu
     )
     QuizGlobalPlayer.objects.create(game=new_game, player=user, seat="A")
     QuizGlobalPlayer.objects.create(game=new_game, player=opponent, seat="B")
+    reserve_player(user, new_game)
+    reserve_player(opponent, new_game)
     if new_game.mise > 0:
         if not hasattr(user, "portefeuille"):
             raise ValidationError("Portefeuille introuvable.")
@@ -1017,7 +1103,7 @@ def list_my_games(user):
     expirer_parties_en_attente()
     return (
         QuizGlobalGame.objects.filter(players__player=user)
-        .exclude(status__in=[QuizGlobalGame.Status.FINISHED, QuizGlobalGame.Status.CANCELLED])
+        .exclude(status__in=INACTIVE_STATUSES)
         .select_related("invited_player")
         .prefetch_related("players__player")
         .distinct()
@@ -1027,10 +1113,18 @@ def list_my_games(user):
 
 def mes_invitations(user):
     expirer_parties_en_attente()
+    pendantes = QuizGlobalInvitation.objects.filter(
+        receiver=user,
+        status=QuizGlobalInvitation.Status.PENDING,
+    ).values_list("game_id", flat=True)
     return (
-        QuizGlobalGame.objects.filter(status=QuizGlobalGame.Status.WAITING, invited_player=user)
+        QuizGlobalGame.objects.filter(
+            status=QuizGlobalGame.Status.WAITING,
+            pk__in=pendantes,
+        )
         .select_related("invited_player")
         .prefetch_related("players__player")
+        .distinct()
         .order_by("-cree_le")
     )
 

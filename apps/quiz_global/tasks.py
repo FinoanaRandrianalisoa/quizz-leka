@@ -10,7 +10,15 @@ def quiz_global_tick(game_id: int):
 
 @shared_task(queue="matches")
 def quiz_global_cleanup_waiting_periodic():
-    """Annule périodiquement les salons Quizz Global restés à l'état WAITING trop longtemps."""
+    """Passe périodiquement les salons Quizz Global restés WAITING trop longtemps à EXPIRED."""
     from apps.quiz_global.services import expirer_parties_en_attente
 
     return expirer_parties_en_attente()
+
+
+@shared_task(queue="matches")
+def quiz_global_cleanup_abandoned_periodic():
+    """Passe à ABANDONED les parties restées bloquées sans progression de phase."""
+    from apps.quiz_global.services import abandonner_parties_bloquees
+
+    return abandonner_parties_bloquees()

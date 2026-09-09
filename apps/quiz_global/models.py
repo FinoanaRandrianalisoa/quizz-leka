@@ -7,14 +7,15 @@ from common.models import TimeStampedModel
 class QuizGlobalGame(TimeStampedModel):
     class Status(models.TextChoices):
         WAITING = "WAITING"
-        STARTING = "STARTING"
         THEME_SELECTION = "THEME_SELECTION"
         QUESTION_READING = "QUESTION_READING"
         ANSWERING = "ANSWERING"
         QUESTION_FINISHED = "QUESTION_FINISHED"
-        TIE_BREAK = "TIE_BREAK"
+        TIE_BREAK_THEME = "TIE_BREAK_THEME"
         FINISHED = "FINISHED"
         CANCELLED = "CANCELLED"
+        EXPIRED = "EXPIRED"
+        ABANDONED = "ABANDONED"
 
     status = models.CharField(max_length=40, choices=Status.choices, default=Status.WAITING)
     target_questions = models.PositiveSmallIntegerField()
@@ -40,6 +41,8 @@ class QuizGlobalGame(TimeStampedModel):
     phase_deadline = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    expired_at = models.DateTimeField(null=True, blank=True)
+    abandoned_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-cree_le"]
@@ -61,6 +64,65 @@ class QuizGlobalPlayer(TimeStampedModel):
             models.UniqueConstraint(fields=["game", "player"], name="quiz_global_unique_player"),
             models.UniqueConstraint(fields=["game", "seat"], name="quiz_global_unique_seat"),
         ]
+
+
+class QuizGlobalActivePlayer(models.Model):
+    """Verrou de « une seule partie active par joueur ».
+
+    Une ligne par joueur au maximum (OneToOne) : la base refuse donc
+    physiquement la création d'une seconde partie active pour le même joueur,
+    même en cas de course concurrente non couverte par un verrou applicatif.
+    """
+
+    player = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        primary_key=True,
+        related_name="quiz_global_active",
+    )
+    game = models.ForeignKey(
+        QuizGlobalGame,
+        on_delete=models.CASCADE,
+        related_name="active_players",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"ActivePlayer(user={self.player_id}, game={self.game_id})"
+
+
+class QuizGlobalInvitation(models.Model):
+    """Invitation ciblée d'un hôte vers un joueur.
+
+    Un hôte peut envoyer plusieurs invitations (vers B, C, D…) pour un même
+    salon ; le premier joueur qui accepte obtient la place B, les autres
+    invitations passent à EXPIRED.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "En attente"
+        ACCEPTED = "ACCEPTED", "Acceptée"
+        EXPIRED = "EXPIRED", "Expirée"
+        CANCELLED = "CANCELLED", "Annulée"
+
+    game = models.ForeignKey(QuizGlobalGame, on_delete=models.CASCADE, related_name="invitations")
+    sender = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="quiz_global_invitations_sent")
+    receiver = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="quiz_global_invitations_received")
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["game", "receiver"], name="quiz_global_unique_invitee"),
+        ]
+        indexes = [
+            models.Index(fields=["receiver", "status"]),
+            models.Index(fields=["game", "status"]),
+        ]
+
+    def __str__(self):
+        return f"Invitation(user={self.sender_id} -> {self.receiver_id}, game={self.game_id}, {self.status})"
 
 
 class QuizGlobalGameQuestion(TimeStampedModel):

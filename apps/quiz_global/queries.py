@@ -2,6 +2,7 @@ import strawberry
 from strawberry.types import Info
 
 from apps.quiz_global import services
+from apps.quiz_global.active_game_service import get_active_game
 from apps.quiz_global.types import QuizGlobalState, to_state
 from common.graphql.permissions import get_current_user
 
@@ -17,6 +18,19 @@ class QuizGlobalQuery:
     def mes_parties_quiz_global(self, info: Info) -> list[QuizGlobalState]:
         user = get_current_user(info)
         return [to_state(game, user) for game in services.list_my_games(user)]
+
+    @strawberry.field
+    def my_active_game(self, info: Info) -> QuizGlobalState | None:
+        """La partie réellement active du joueur (ou null si aucun).
+
+        Une partie FINISHED/CANCELLED/EXPIRED/ABANDONED n'est jamais retournée :
+        elle ne bloque plus le joueur.
+        """
+        user = get_current_user(info)
+        game = get_active_game(user)
+        if game is None:
+            return None
+        return to_state(game, user)
 
     @strawberry.field
     def partie_quiz_global(self, info: Info, game_id: int) -> QuizGlobalState:

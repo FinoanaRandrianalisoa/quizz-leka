@@ -17,8 +17,14 @@ from apps.quiz_global.errors import (
     MatchNotFoundError,
     PlayerAlreadyInGameError,
 )
-from apps.quiz_global.models import QuizGlobalGame, QuizGlobalPlayer
+from apps.quiz_global.models import (
+    QuizGlobalActivePlayer,
+    QuizGlobalGame,
+    QuizGlobalInvitation,
+    QuizGlobalPlayer,
+)
 from apps.quiz_global.services import (
+    abandonner_parties_bloquees,
     annuler_game,
     create_game,
     expirer_parties_en_attente,
@@ -200,20 +206,21 @@ def test_waiting_game_expires_and_mise_is_refunded():
     pf_a.refresh_from_db()
     assert pf_a.solde_bloque == Decimal("100")
 
-    # Fais vieillir le salon au-delà des 5 minutes.
-    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=10))
+    # Fais vieillir le salon au-delà des 30 minutes de délai d'expiration.
+    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=31))
 
     assert expirer_parties_en_attente() == 1
     game.refresh_from_db()
-    assert game.status == QuizGlobalGame.Status.CANCELLED
+    assert game.status == QuizGlobalGame.Status.EXPIRED
 
     # La mise bloquée est remboursée à l'hôte.
     pf_a.refresh_from_db()
     assert pf_a.solde_bloque == Decimal("0")
     assert pf_a.solde_recharge == Decimal("1000")
 
-    # L'hôte n'a plus de partie active ni d'invitation visible côté invité.
+    # L'hôte est libéré : plus de partie active ni d'invitation visible côté invité.
     assert list(list_my_games(a)) == []
+    assert not QuizGlobalActivePlayer.objects.filter(player=a).exists()
     with pytest.raises(GameCancelledError):
         join_game(b, game.pk)
 
@@ -239,12 +246,12 @@ def test_get_game_expires_old_waiting_game():
     a = _user("get@conc.mg", "GetA")
     b = _user("getb@conc.mg", "GetB")
     game = create_game(a, 4, invite_id=b.pk)
-    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=10))
+    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=31))
 
     with pytest.raises(MatchNotFoundError):
         get_game(game.pk)
     game.refresh_from_db()
-    assert game.status == QuizGlobalGame.Status.CANCELLED
+    assert game.status == QuizGlobalGame.Status.EXPIRED
     assert list(list_my_games(a)) == []
 
 
@@ -257,10 +264,10 @@ def test_join_expired_waiting_game_is_cancelled():
     a = _user("join@conc.mg", "JoinA")
     b = _user("joinb@conc.mg", "JoinB")
     game = create_game(a, 4, invite_id=b.pk)
-    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=10))
+    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=31))
 
     with pytest.raises(GameCancelledError):
         join_game(b, game.pk)
     game.refresh_from_db()
-    assert game.status == QuizGlobalGame.Status.CANCELLED
+    assert game.status == QuizGlobalGame.Status.EXPIRED
     assert QuizGlobalPlayer.objects.filter(game=game).count() == 1

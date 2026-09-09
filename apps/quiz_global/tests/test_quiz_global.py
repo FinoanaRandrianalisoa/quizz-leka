@@ -307,6 +307,9 @@ def test_mise_blocks_funds_and_settles_winner():
     def settle(a_score, b_score):
         scores["A"] = a_score
         scores["B"] = b_score
+        # La machine d'états exige une fin depuis QUESTION_FINISHED
+        game.status = QuizGlobalGame.Status.QUESTION_FINISHED
+        game.save(update_fields=["status"])
         services._finish_game(game, a_score, b_score, draw=(a_score == b_score))
 
     settle(4, 2)
@@ -326,6 +329,8 @@ def test_mise_blocks_funds_and_settles_winner():
     b.portefeuille.refresh_from_db()
     game2 = create_game(a, 4, mise=Decimal("50"))
     game2 = join_game(b, game2.pk, mise=Decimal("50"))
+    game2.status = QuizGlobalGame.Status.QUESTION_FINISHED
+    game2.save(update_fields=["status"])
     services._finish_game(game2, 2, 2, draw=True)
     pf_a.refresh_from_db()
     pf_b.refresh_from_db()

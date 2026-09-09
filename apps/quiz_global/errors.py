@@ -21,11 +21,59 @@ class GameNotJoinableError(QuizGlobalError):
     default_message = "Cette partie ne peut pas être rejointe."
 
 
+class GameFullError(GameNotJoinableError):
+    code = "GAME_FULL"
+    default_message = "Un autre joueur a déjà rejoint cette partie."
+
+
+class GameCancelledError(QuizGlobalError):
+    code = "GAME_CANCELLED"
+    default_message = "Cette partie a été annulée."
+
+
+class InvalidTransitionError(QuizGlobalError):
+    code = "INVALID_TRANSITION"
+    default_message = "Transition de statut invalide."
+
+
+class PlayerAlreadyInGameError(QuizGlobalError):
+    code = "PLAYER_ALREADY_IN_GAME"
+    default_message = "Vous êtes déjà engagé dans une autre partie."
+
+
+ALLOWED_TRANSITIONS: dict[str, set[str]] = {
+    "WAITING": {"THEME_SELECTION", "CANCELLED"},
+    "STARTING": {"THEME_SELECTION"},
+    "THEME_SELECTION": {"QUESTION_READING", "CANCELLED"},
+    "QUESTION_READING": {"ANSWERING"},
+    "ANSWERING": {"QUESTION_FINISHED"},
+    "QUESTION_FINISHED": {"QUESTION_READING", "THEME_SELECTION", "TIE_BREAK", "FINISHED"},
+    "TIE_BREAK": {"QUESTION_READING", "FINISHED"},
+    "FINISHED": set(),
+    "CANCELLED": set(),
+}
+
+
+def validate_transition(current_status: str, new_status: str) -> None:
+    """Vérifie que la transition d'état est autorisée par la machine d'états."""
+    allowed = ALLOWED_TRANSITIONS.get(current_status, set())
+    if new_status not in allowed:
+        raise InvalidTransitionError(
+            f"Transition interdite : {current_status} -> {new_status}"
+        )
+
+
 __all__ = [
     "QuizGlobalError",
     "ThemeUnavailableError",
     "AnswerRejectedError",
     "GameNotJoinableError",
+    "GameFullError",
+    "GameCancelledError",
+    "InvalidTransitionError",
+    "PlayerAlreadyInGameError",
+    "ALLOWED_TRANSITIONS",
+    "validate_transition",
     "ValidationError",
     "MatchNotFoundError",
     "NotYourTurnError",

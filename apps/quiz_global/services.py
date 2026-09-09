@@ -16,12 +16,15 @@ logger = logging.getLogger(__name__)
 from apps.betting.models import Pari  # noqa: F401
 from apps.quiz_global.errors import (
     AnswerRejectedError,
+    GameFullError,
     GameNotJoinableError,
     MatchNotFoundError,
     NotYourTurnError,
+    PlayerAlreadyInGameError,
     QuizGlobalError,
     ThemeUnavailableError,
     ValidationError,
+    validate_transition,
 )
 from apps.quiz_global.models import (
     QuizGlobalGame,
@@ -313,6 +316,21 @@ def create_game(user, target_questions: int, invite_id: int | None = None, mise:
         invited = Utilisateur.objects.filter(pk=invite_id).first()
         if invited is None or invited.pk == user.pk:
             raise ValidationError("Adversaire invalide.")
+    # Un joueur ne peut pas créer de partie s'il est déjà dans une partie active
+    active_statuses = [
+        QuizGlobalGame.Status.WAITING,
+        QuizGlobalGame.Status.THEME_SELECTION,
+        QuizGlobalGame.Status.QUESTION_READING,
+        QuizGlobalGame.Status.ANSWERING,
+        QuizGlobalGame.Status.QUESTION_FINISHED,
+        QuizGlobalGame.Status.TIE_BREAK,
+    ]
+    already_active = QuizGlobalGame.objects.filter(
+        players__player=user,
+        status__in=active_statuses,
+    ).exists()
+    if already_active:
+        raise PlayerAlreadyInGameError("Vous êtes déjà engagé dans une autre partie. Terminez-la d'abord.")
     if not hasattr(user, "portefeuille"):
         raise ValidationError("Portefeuille introuvable.")
     mise = _valider_mise(mise, user.portefeuille)
@@ -365,8 +383,7 @@ def annuler_game(user, game_id: int) -> bool:
     game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
     if game is None:
         raise MatchNotFoundError()
-    if game.status != QuizGlobalGame.Status.WAITING:
-        raise QuizGlobalError("Seules les parties en attente peuvent être annulées.")
+    validate_transition(game.status, QuizGlobalGame.Status.CANCELLED)
     player = game.players.filter(player=user).first()
     if player is None:
         raise QuizGlobalError("Vous ne participez pas à cette partie.")
@@ -405,7 +422,8 @@ def refuser_invitation(user, game_id: int) -> bool:
     game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
     if game is None:
         raise MatchNotFoundError()
-    if game.status != QuizGlobalGame.Status.WAITING or game.invited_player_id != user.pk:
+    validate_transition(game.status, QuizGlobalGame.Status.CANCELLED)
+    if game.invited_player_id != user.pk:
         raise QuizGlobalError("Aucune invitation en attente pour cette partie.")
     host = game.players.filter(seat="A").select_related("player").first()
     game.status = QuizGlobalGame.Status.CANCELLED
@@ -435,27 +453,95 @@ def refuser_invitation(user, game_id: int) -> bool:
 
 @transaction.atomic
 def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame:
+    """Rejoindre une partie en attente.
+
+    Protégé par transaction atomique + select_for_update pour garantir
+    qu'un seul joueur obtient le slot playerB même en cas d'acceptations
+    simultanées (anti-double-acceptation).
+
+    Règles :
+    - La partie doit être en status WAITING
+    - playerB doit être NULL (partie pas encore complète)
+    - Le joueur ne doit pas déjà participer à cette partie
+    - Le joueur ne doit pas être engagé dans une autre partie active
+    - Si une invitation ciblée existe, seul le joueur invité peut rejoindre
+    """
     game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
     if game is None:
         raise MatchNotFoundError()
+
+    # ── Vérification de la machine d'états ──
     if game.status != QuizGlobalGame.Status.WAITING:
-        raise GameNotJoinableError()
+        if game.status == QuizGlobalGame.Status.CANCELLED:
+            from apps.quiz_global.errors import GameCancelledError
+            raise GameCancelledError()
+        raise GameFullError()
+
+    # ── Anti-double-acceptation cross-game ──
+    # Un joueur ne peut pas être dans deux parties actives simultanément.
+    active_statuses = [
+        QuizGlobalGame.Status.WAITING,
+        QuizGlobalGame.Status.THEME_SELECTION,
+        QuizGlobalGame.Status.QUESTION_READING,
+        QuizGlobalGame.Status.ANSWERING,
+        QuizGlobalGame.Status.QUESTION_FINISHED,
+        QuizGlobalGame.Status.TIE_BREAK,
+    ]
+    already_active = (
+        QuizGlobalGame.objects.filter(
+            players__player=user,
+            status__in=active_statuses,
+        )
+        .exclude(pk=game_id)
+        .exists()
+    )
+    if already_active:
+        raise PlayerAlreadyInGameError()
+
+    # ── Idem pour l'hôte : il ne doit pas déjà jouer un autre duel ──
+    # A ne peut pas créer game1→B et game2→C puis jouer les deux à la fois.
+    host = game.players.filter(seat="A").select_related("player").first()
+    host_already_active = (
+        QuizGlobalGame.objects.filter(
+            players__player=host.player if host else None,
+            status__in=active_statuses,
+        )
+        .exclude(pk=game_id)
+        .exists()
+    )
+    if host_already_active:
+        raise PlayerAlreadyInGameError(
+            "L'hôte est déjà engagé dans une autre partie Quizz Global."
+        )
+
+    # ── Déjà dans cette partie ? ──
     if game.players.filter(player=user).exists():
         raise GameNotJoinableError("Vous êtes déjà dans cette partie.")
+
+    # ── Invitation ciblée : seul le joueur invité peut rejoindre ──
     if game.invited_player_id and game.invited_player_id != user.pk:
         raise GameNotJoinableError("Cette partie est réservée à un autre joueur.")
+
+    # ── Nombre max de joueurs (2) ──
     if game.players.count() >= 2:
-        raise GameNotJoinableError()
+        raise GameFullError()
+
+    # ── Portefeuille requis si mise ──
     if not hasattr(user, "portefeuille"):
         raise ValidationError("Portefeuille introuvable.")
 
+    # ── Mise : le serveur décide. L'invite ne peut pas modifier la mise de l'hôte. ──
     eff = Decimal("0")
     proposition = Decimal("0")
     if game.mise > 0:
         proposition = game.mise if mise is None else _valider_mise(mise, user.portefeuille)
     game.mise_proposee_invite = proposition
 
+    # ── Création du playerB + transition atomique ──
     QuizGlobalPlayer.objects.create(game=game, player=user, seat="B")
+
+    # Appliquer la transition via la machine d'états
+    validate_transition(game.status, QuizGlobalGame.Status.THEME_SELECTION)
     now = timezone.now()
     game.status = QuizGlobalGame.Status.THEME_SELECTION
     game.started_at = now
@@ -464,6 +550,7 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
     game.active_seat = "A"
     game.save()
 
+    # ── Gestion des mises ──
     if game.mise > 0:
         wallet_services.bloquer_mise(
             user.portefeuille,
@@ -505,10 +592,11 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
             metadata={"game": game.pk},
         )
 
+    # ── Diffusion WebSocket ──
     _notify(game, "PLAYER_JOINED")
     _notify(game, "GAME_STARTED")
     _notify(game, "THEME_SELECTION_STARTED")
-    
+
     # Notifier l'hôte via WebSocket de notifications
     try:
         channel_layer = get_channel_layer()
@@ -527,10 +615,9 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
                     },
                 },
             )
-            logger.info(f"Notification acceptation quiz global envoyée à l'hôte {host_player.player_id} via notifications_{host_player.player_id}")
     except Exception as e:
         logger.error(f"Erreur diffusion notification acceptation quiz global: {e}")
-    
+
     return game
 
 
@@ -560,6 +647,7 @@ def _create_game_question(game: QuizGlobalGame, theme: Theme, is_tie_break: bool
         is_tie_break=is_tie_break,
         reading_started_at=now,
     )
+    validate_transition(game.status, QuizGlobalGame.Status.QUESTION_READING)
     game.status = QuizGlobalGame.Status.QUESTION_READING
     game.phase_started_at = now
     game.phase_deadline = now + READING_DURATION
@@ -628,6 +716,7 @@ def _start_answering(game: QuizGlobalGame) -> None:
     if gq is None:
         return
     now = timezone.now()
+    validate_transition(game.status, QuizGlobalGame.Status.ANSWERING)
     game.status = QuizGlobalGame.Status.ANSWERING
     game.phase_started_at = now
     game.phase_deadline = now + ANSWERING_DURATION
@@ -654,6 +743,7 @@ def _finish_question(game: QuizGlobalGame) -> None:
             ans.save(update_fields=["points_awarded"])
             pl.score += 1
             pl.save(update_fields=["score"])
+    validate_transition(game.status, QuizGlobalGame.Status.QUESTION_FINISHED)
     game.status = QuizGlobalGame.Status.QUESTION_FINISHED
     game.phase_started_at = now
     game.phase_deadline = now + RESULT_DURATION
@@ -682,6 +772,7 @@ def _advance_after_result(game: QuizGlobalGame) -> None:
 
     if normal_done < game.target_questions:
         game.active_seat = "B" if game.active_seat == "A" else "A"
+        validate_transition(game.status, QuizGlobalGame.Status.THEME_SELECTION)
         game.status = QuizGlobalGame.Status.THEME_SELECTION
         game.phase_started_at = timezone.now()
         game.phase_deadline = None
@@ -691,6 +782,7 @@ def _advance_after_result(game: QuizGlobalGame) -> None:
         return
 
     if score_a == score_b:
+        validate_transition(game.status, QuizGlobalGame.Status.TIE_BREAK)
         game.status = QuizGlobalGame.Status.TIE_BREAK
         game.save()
         _notify(game, "TIE_BREAK_STARTED")
@@ -716,6 +808,7 @@ def _finish_game(game: QuizGlobalGame, score_a: int, score_b: int, draw: bool = 
         elif score_b > score_a:
             winner = players["B"].player
     game.winner = winner
+    validate_transition(game.status, QuizGlobalGame.Status.FINISHED)
     game.status = QuizGlobalGame.Status.FINISHED
     game.finished_at = timezone.now()
     game.phase_deadline = None

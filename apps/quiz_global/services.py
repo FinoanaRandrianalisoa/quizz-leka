@@ -509,7 +509,7 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
     _notify(game, "GAME_STARTED")
     _notify(game, "THEME_SELECTION_STARTED")
     
-    # Notifier l'hôte via WebSocket que l'invité a rejoint
+    # Notifier l'hôte via WebSocket de notifications
     try:
         channel_layer = get_channel_layer()
         host_player = game.players.filter(seat="A").select_related("player").first()
@@ -527,7 +527,7 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
                     },
                 },
             )
-            logger.info(f"Notification acceptation quiz global envoyée à l'hôte {host_player.player_id}")
+            logger.info(f"Notification acceptation quiz global envoyée à l'hôte {host_player.player_id} via notifications_{host_player.player_id}")
     except Exception as e:
         logger.error(f"Erreur diffusion notification acceptation quiz global: {e}")
     

@@ -239,6 +239,14 @@ CELERY_TASK_QUEUES = {
 CELERY_TASK_DEFAULT_QUEUE = "default"
 CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 3600}
 
+# Celles-ci sont envoyées par le worker "beat" (config/celery.py + django_celery_beat).
+CELERY_BEAT_SCHEDULE = {
+    "quiz-global-cleanup-waiting-periodic": {
+        "task": "apps.quiz_global.tasks.quiz_global_cleanup_waiting_periodic",
+        "schedule": 60.0,
+    },
+}
+
 # JWT maison
 JWT_ACCESS_TTL = env.int("JWT_ACCESS_TTL", default=900)
 JWT_REFRESH_TTL = env.int("JWT_REFRESH_TTL", default=2592000)

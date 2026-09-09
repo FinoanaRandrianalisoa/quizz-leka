@@ -14,10 +14,18 @@ from apps.quiz_global.errors import (
     GameCancelledError,
     GameFullError,
     GameNotJoinableError,
+    MatchNotFoundError,
     PlayerAlreadyInGameError,
 )
 from apps.quiz_global.models import QuizGlobalGame, QuizGlobalPlayer
-from apps.quiz_global.services import annuler_game, create_game, join_game
+from apps.quiz_global.services import (
+    annuler_game,
+    create_game,
+    expirer_parties_en_attente,
+    get_game,
+    join_game,
+    list_my_games,
+)
 from apps.users.models import Utilisateur
 
 
@@ -170,3 +178,89 @@ def test_host_cannot_play_two_duels_at_once():
     with pytest.raises(PlayerAlreadyInGameError):
         join_game(c, game2.pk)
     assert QuizGlobalPlayer.objects.filter(game=game2).count() == 1
+
+
+@pytest.mark.django_db
+def test_waiting_game_expires_and_mise_is_refunded():
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from django.utils import timezone
+
+    from apps.wallet.models import Portefeuille
+
+    a = _user("exp@conc.mg", "ExpAlice")
+    b = _user("expb@conc.mg", "ExpBob")
+    pf_a = Portefeuille.objects.get(utilisateur=a)
+    pf_a.solde_recharge = Decimal("1000")
+    pf_a.save(update_fields=["solde_recharge"])
+    a.portefeuille.refresh_from_db()
+
+    game = create_game(a, 4, mise=Decimal("100"), invite_id=b.pk)
+    pf_a.refresh_from_db()
+    assert pf_a.solde_bloque == Decimal("100")
+
+    # Fais vieillir le salon au-delà des 5 minutes.
+    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=10))
+
+    assert expirer_parties_en_attente() == 1
+    game.refresh_from_db()
+    assert game.status == QuizGlobalGame.Status.CANCELLED
+
+    # La mise bloquée est remboursée à l'hôte.
+    pf_a.refresh_from_db()
+    assert pf_a.solde_bloque == Decimal("0")
+    assert pf_a.solde_recharge == Decimal("1000")
+
+    # L'hôte n'a plus de partie active ni d'invitation visible côté invité.
+    assert list(list_my_games(a)) == []
+    with pytest.raises(GameCancelledError):
+        join_game(b, game.pk)
+
+
+@pytest.mark.django_db
+def test_recent_waiting_game_is_not_expired():
+    a = _user("recent@conc.mg", "RecentA")
+    b = _user("recentb@conc.mg", "RecentB")
+    game = create_game(a, 4, invite_id=b.pk)
+
+    assert expirer_parties_en_attente() == 0
+    game.refresh_from_db()
+    assert game.status == QuizGlobalGame.Status.WAITING
+    assert len(list(list_my_games(a))) == 1
+
+
+@pytest.mark.django_db
+def test_get_game_expires_old_waiting_game():
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    a = _user("get@conc.mg", "GetA")
+    b = _user("getb@conc.mg", "GetB")
+    game = create_game(a, 4, invite_id=b.pk)
+    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=10))
+
+    with pytest.raises(MatchNotFoundError):
+        get_game(game.pk)
+    game.refresh_from_db()
+    assert game.status == QuizGlobalGame.Status.CANCELLED
+    assert list(list_my_games(a)) == []
+
+
+@pytest.mark.django_db
+def test_join_expired_waiting_game_is_cancelled():
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    a = _user("join@conc.mg", "JoinA")
+    b = _user("joinb@conc.mg", "JoinB")
+    game = create_game(a, 4, invite_id=b.pk)
+    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=10))
+
+    with pytest.raises(GameCancelledError):
+        join_game(b, game.pk)
+    game.refresh_from_db()
+    assert game.status == QuizGlobalGame.Status.CANCELLED
+    assert QuizGlobalPlayer.objects.filter(game=game).count() == 1

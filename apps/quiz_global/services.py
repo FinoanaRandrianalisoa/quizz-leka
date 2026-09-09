@@ -43,6 +43,7 @@ ANSWERING_DURATION = timedelta(seconds=10)
 RESULT_DURATION = timedelta(seconds=5)
 TARGET_ALLOWED = {4, 8, 12}
 OPTION_LETTERS = ("A", "B", "C", "D")
+WAITING_EXPIRY_SECONDS = 300  # 5 minutes : salon auto-annulé si personne ne rejoint
 
 
 def _mise_reference(game_id: int, user_id: int) -> str:
@@ -202,6 +203,7 @@ def serialize_game(game: QuizGlobalGame, viewer=None) -> dict:
         "phaseStartedAt": game.phase_started_at.isoformat() if game.phase_started_at else None,
         "phaseDeadline": game.phase_deadline.isoformat() if game.phase_deadline else None,
         "serverTime": now.isoformat(),
+        "createdAt": game.cree_le.isoformat() if game.cree_le else None,
         "mise": f"{game.mise:.2f}",
         "miseEffective": f"{mise_effective(game):.2f}",
         "themes": theme_availability(game) if game.status == QuizGlobalGame.Status.THEME_SELECTION else [],
@@ -378,6 +380,68 @@ def publish_open_game(user, game: QuizGlobalGame) -> Publication:
     )
 
 
+def _liberer_mise_hote(game: QuizGlobalGame, motif: str = "annulation") -> None:
+    """Rembourse la mise bloquée de l'hôte (salon jamais commencé)."""
+    if game.mise <= 0:
+        return
+    host_player = game.players.filter(seat="A").select_related("player__portefeuille").first()
+    if host_player is None or not hasattr(host_player.player, "portefeuille"):
+        return
+    wallet_services.liberer_mise(
+        host_player.player.portefeuille,
+        game.mise,
+        type_=LedgerEntry.Type.REMBOURSEMENT,
+        reference=f"remboursement-quiz-global-{game.pk}-{host_player.player.pk}",
+        metadata={"game": game.pk, "motif": motif},
+        idempotency_key=f"{motif}:{game.pk}:{host_player.player.pk}",
+    )
+
+
+@transaction.atomic
+def _expirer_salon(game: QuizGlobalGame) -> None:
+    """Annule un salon WAITING (expiration automatique). Row déjà verrouillée."""
+    if game.status != QuizGlobalGame.Status.WAITING:
+        return
+    invited = game.invited_player
+    host = game.players.filter(seat="A").select_related("player").first()
+    game.status = QuizGlobalGame.Status.CANCELLED
+    game.invited_player = None
+    game.save(update_fields=["status", "invited_player"])
+    _liberer_mise_hote(game, motif="expiration")
+    _notify(game, "GAME_CANCELLED")
+    if invited is not None:
+        envoyer_notification(
+            invited,
+            Notification.Type.SYSTEME,
+            "Salon Quizz Global annulé",
+            f"L'invitation de {host.player.pseudo if host else 'l’hôte'} est annulée : "
+            f"personne n'a rejoint la partie en 5 minutes.",
+            reference_id=game.pk,
+            expediteur=host.player if host else None,
+        )
+
+
+@transaction.atomic
+def expirer_parties_en_attente(expiration_secondes: int = WAITING_EXPIRY_SECONDS) -> int:
+    """Annule automatiquement les salons WAITING plus vieux que `expiration_secondes`.
+
+    Appelé périodiquement (Celery beat) et paresseusement (list/get) pour garantir
+    qu'aucun salon ne reste bloquant plus de 5 minutes.
+    """
+    cutoff = timezone.now() - timedelta(seconds=expiration_secondes)
+    expired_ids = list(
+        QuizGlobalGame.objects.filter(
+            status=QuizGlobalGame.Status.WAITING,
+            cree_le__lt=cutoff,
+        ).values_list("pk", flat=True)
+    )
+    for game_id in expired_ids:
+        game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
+        _expirer_salon(game)
+    logger.info("Expiration salons Quizz Global : %d partie(s) annulée(s)", len(expired_ids))
+    return len(expired_ids)
+
+
 @transaction.atomic
 def annuler_game(user, game_id: int) -> bool:
     game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
@@ -393,18 +457,8 @@ def annuler_game(user, game_id: int) -> bool:
     game.status = QuizGlobalGame.Status.CANCELLED
     game.invited_player = None
     game.save(update_fields=["status", "invited_player"])
+    _liberer_mise_hote(game, motif="annulation")
     _notify(game, "GAME_CANCELLED")
-    if game.mise > 0:
-        host_player = game.players.filter(seat="A").select_related("player__portefeuille").first()
-        if host_player and hasattr(host_player.player, "portefeuille"):
-            wallet_services.liberer_mise(
-                host_player.player.portefeuille,
-                game.mise,
-                type_=LedgerEntry.Type.REMBOURSEMENT,
-                reference=f"remboursement-quiz-global-{game.pk}-{host_player.player.pk}",
-                metadata={"game": game.pk},
-                idempotency_key=f"annulation:{game.pk}:{host_player.player.pk}",
-            )
     if invited is not None and invited.pk != user.pk:
         envoyer_notification(
             invited,
@@ -429,16 +483,8 @@ def refuser_invitation(user, game_id: int) -> bool:
     game.status = QuizGlobalGame.Status.CANCELLED
     game.invited_player = None
     game.save(update_fields=["status", "invited_player"])
+    _liberer_mise_hote(game, motif="refus")
     _notify(game, "INVITATION_REFUSED")
-    if game.mise > 0 and host is not None and hasattr(host.player, "portefeuille"):
-        wallet_services.liberer_mise(
-            host.player.portefeuille,
-            game.mise,
-            type_=LedgerEntry.Type.REMBOURSEMENT,
-            reference=f"refus-quiz-global-{game.pk}-{host.player.pk}",
-            metadata={"game": game.pk},
-            idempotency_key=f"refus:{game.pk}:{host.player.pk}",
-        )
     if host is not None:
         envoyer_notification(
             host.player,
@@ -452,6 +498,25 @@ def refuser_invitation(user, game_id: int) -> bool:
 
 
 @transaction.atomic
+def _expirer_salon_en_attente(game_id: int) -> bool:
+    """Annule uniquement ce salon s'il est WAITING et plus vieux que la limite.
+
+    Transaction dédiée (commitée) : utilisée juste avant un join/get pour que
+    l'annulation survive à l'exception levée ensuite.
+    """
+    game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
+    if game is None:
+        return False
+    if (
+        game.status == QuizGlobalGame.Status.WAITING
+        and game.cree_le
+        and game.cree_le < timezone.now() - timedelta(seconds=WAITING_EXPIRY_SECONDS)
+    ):
+        _expirer_salon(game)
+        return True
+    return False
+
+
 def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame:
     """Rejoindre une partie en attente.
 
@@ -466,159 +531,166 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
     - Le joueur ne doit pas être engagé dans une autre partie active
     - Si une invitation ciblée existe, seul le joueur invité peut rejoindre
     """
-    game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
-    if game is None:
-        raise MatchNotFoundError()
+    # ── Phase 1 : expiration ciblée (transaction dédiée, commitée) ──
+    # Un salon WAITING trop vieux est annulé d'abord. L'erreur GameCancelledError
+    # levée en phase 2 protège le join de la partie annulée, et l'annulation
+    # persiste en base.
+    _expirer_salon_en_attente(game_id)
 
-    # ── Vérification de la machine d'états ──
-    if game.status != QuizGlobalGame.Status.WAITING:
-        if game.status == QuizGlobalGame.Status.CANCELLED:
-            from apps.quiz_global.errors import GameCancelledError
-            raise GameCancelledError()
-        raise GameFullError()
+    with transaction.atomic():
+        game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
+        if game is None:
+            raise MatchNotFoundError()
 
-    # ── Anti-double-acceptation cross-game ──
-    # Un joueur ne peut pas être dans deux parties actives simultanément.
-    active_statuses = [
-        QuizGlobalGame.Status.WAITING,
-        QuizGlobalGame.Status.THEME_SELECTION,
-        QuizGlobalGame.Status.QUESTION_READING,
-        QuizGlobalGame.Status.ANSWERING,
-        QuizGlobalGame.Status.QUESTION_FINISHED,
-        QuizGlobalGame.Status.TIE_BREAK,
-    ]
-    already_active = (
-        QuizGlobalGame.objects.filter(
-            players__player=user,
-            status__in=active_statuses,
-        )
-        .exclude(pk=game_id)
-        .exists()
-    )
-    if already_active:
-        raise PlayerAlreadyInGameError()
+        # ── Vérification de la machine d'états ──
+        if game.status != QuizGlobalGame.Status.WAITING:
+            if game.status == QuizGlobalGame.Status.CANCELLED:
+                from apps.quiz_global.errors import GameCancelledError
+                raise GameCancelledError()
+            raise GameFullError()
 
-    # ── Idem pour l'hôte : il ne doit pas déjà jouer un autre duel ──
-    # A ne peut pas créer game1→B et game2→C puis jouer les deux à la fois.
-    host = game.players.filter(seat="A").select_related("player").first()
-    host_already_active = (
-        QuizGlobalGame.objects.filter(
-            players__player=host.player if host else None,
-            status__in=active_statuses,
-        )
-        .exclude(pk=game_id)
-        .exists()
-    )
-    if host_already_active:
-        raise PlayerAlreadyInGameError(
-            "L'hôte est déjà engagé dans une autre partie Quizz Global."
-        )
-
-    # ── Déjà dans cette partie ? ──
-    if game.players.filter(player=user).exists():
-        raise GameNotJoinableError("Vous êtes déjà dans cette partie.")
-
-    # ── Invitation ciblée : seul le joueur invité peut rejoindre ──
-    if game.invited_player_id and game.invited_player_id != user.pk:
-        raise GameNotJoinableError("Cette partie est réservée à un autre joueur.")
-
-    # ── Nombre max de joueurs (2) ──
-    if game.players.count() >= 2:
-        raise GameFullError()
-
-    # ── Portefeuille requis si mise ──
-    if not hasattr(user, "portefeuille"):
-        raise ValidationError("Portefeuille introuvable.")
-
-    # ── Mise : le serveur décide. L'invite ne peut pas modifier la mise de l'hôte. ──
-    eff = Decimal("0")
-    proposition = Decimal("0")
-    if game.mise > 0:
-        proposition = game.mise if mise is None else _valider_mise(mise, user.portefeuille)
-    game.mise_proposee_invite = proposition
-
-    # ── Création du playerB + transition atomique ──
-    QuizGlobalPlayer.objects.create(game=game, player=user, seat="B")
-
-    # Appliquer la transition via la machine d'états
-    validate_transition(game.status, QuizGlobalGame.Status.THEME_SELECTION)
-    now = timezone.now()
-    game.status = QuizGlobalGame.Status.THEME_SELECTION
-    game.started_at = now
-    game.phase_started_at = now
-    game.phase_deadline = None
-    game.active_seat = "A"
-    game.save()
-
-    # ── Gestion des mises ──
-    if game.mise > 0:
-        wallet_services.bloquer_mise(
-            user.portefeuille,
-            proposition,
-            reference=_mise_reference(game.pk, user.pk),
-            metadata={"game": game.pk, "role": "invite"},
-            idempotency_key=f"reserve:{game.pk}:{user.pk}",
-        )
-        eff = min(game.mise, proposition) if proposition > 0 else game.mise
-        host_player = game.players.filter(seat="A").select_related("player__portefeuille").first()
-        surplus_hote = game.mise - eff
-        if surplus_hote > 0 and host_player and hasattr(host_player.player, "portefeuille"):
-            wallet_services.liberer_mise(
-                host_player.player.portefeuille,
-                surplus_hote,
-                reference=f"surplus-quiz-global-{game.pk}-{host_player.player.pk}",
-                metadata={"game": game.pk, "role": "hote", "type_de_surplus": "mise"},
-                idempotency_key=f"surplus:{game.pk}:{host_player.player.pk}",
+        # ── Anti-double-acceptation cross-game ──
+        # Un joueur ne peut pas être dans deux parties actives simultanément.
+        active_statuses = [
+            QuizGlobalGame.Status.WAITING,
+            QuizGlobalGame.Status.THEME_SELECTION,
+            QuizGlobalGame.Status.QUESTION_READING,
+            QuizGlobalGame.Status.ANSWERING,
+            QuizGlobalGame.Status.QUESTION_FINISHED,
+            QuizGlobalGame.Status.TIE_BREAK,
+        ]
+        already_active = (
+            QuizGlobalGame.objects.filter(
+                players__player=user,
+                status__in=active_statuses,
             )
-        surplus_invite = proposition - eff
-        if surplus_invite > 0:
-            wallet_services.liberer_mise(
+            .exclude(pk=game_id)
+            .exists()
+        )
+        if already_active:
+            raise PlayerAlreadyInGameError()
+
+        # ── Idem pour l'hôte : il ne doit pas déjà jouer un autre duel ──
+        # A ne peut pas créer game1→B et game2→C puis jouer les deux à la fois.
+        host = game.players.filter(seat="A").select_related("player").first()
+        host_already_active = (
+            QuizGlobalGame.objects.filter(
+                players__player=host.player if host else None,
+                status__in=active_statuses,
+            )
+            .exclude(pk=game_id)
+            .exists()
+        )
+        if host_already_active:
+            raise PlayerAlreadyInGameError(
+                "L'hôte est déjà engagé dans une autre partie Quizz Global."
+            )
+
+        # ── Déjà dans cette partie ? ──
+        if game.players.filter(player=user).exists():
+            raise GameNotJoinableError("Vous êtes déjà dans cette partie.")
+
+        # ── Invitation ciblée : seul le joueur invité peut rejoindre ──
+        if game.invited_player_id and game.invited_player_id != user.pk:
+            raise GameNotJoinableError("Cette partie est réservée à un autre joueur.")
+
+        # ── Nombre max de joueurs (2) ──
+        if game.players.count() >= 2:
+            raise GameFullError()
+
+        # ── Portefeuille requis si mise ──
+        if not hasattr(user, "portefeuille"):
+            raise ValidationError("Portefeuille introuvable.")
+
+        # ── Mise : le serveur décide. L'invite ne peut pas modifier la mise de l'hôte. ──
+        eff = Decimal("0")
+        proposition = Decimal("0")
+        if game.mise > 0:
+            proposition = game.mise if mise is None else _valider_mise(mise, user.portefeuille)
+        game.mise_proposee_invite = proposition
+
+        # ── Création du playerB + transition atomique ──
+        QuizGlobalPlayer.objects.create(game=game, player=user, seat="B")
+
+        # Appliquer la transition via la machine d'états
+        validate_transition(game.status, QuizGlobalGame.Status.THEME_SELECTION)
+        now = timezone.now()
+        game.status = QuizGlobalGame.Status.THEME_SELECTION
+        game.started_at = now
+        game.phase_started_at = now
+        game.phase_deadline = None
+        game.active_seat = "A"
+        game.save()
+
+        # ── Gestion des mises ──
+        if game.mise > 0:
+            wallet_services.bloquer_mise(
                 user.portefeuille,
-                surplus_invite,
-                reference=f"surplus-quiz-global-{game.pk}-{user.pk}",
-                metadata={"game": game.pk, "role": "invite", "type_de_surplus": "mise"},
-                idempotency_key=f"surplus:{game.pk}:{user.pk}",
+                proposition,
+                reference=_mise_reference(game.pk, user.pk),
+                metadata={"game": game.pk, "role": "invite"},
+                idempotency_key=f"reserve:{game.pk}:{user.pk}",
             )
-        wallet_services.engager_mise(
-            host_player.player.portefeuille if host_player else user.portefeuille,
-            eff,
-            reference=f"engage-quiz-global-{game.pk}-hote",
-            metadata={"game": game.pk},
-        )
-        wallet_services.engager_mise(
-            user.portefeuille,
-            eff,
-            reference=f"engage-quiz-global-{game.pk}-{user.pk}",
-            metadata={"game": game.pk},
-        )
+            eff = min(game.mise, proposition) if proposition > 0 else game.mise
+            host_player = game.players.filter(seat="A").select_related("player__portefeuille").first()
+            surplus_hote = game.mise - eff
+            if surplus_hote > 0 and host_player and hasattr(host_player.player, "portefeuille"):
+                wallet_services.liberer_mise(
+                    host_player.player.portefeuille,
+                    surplus_hote,
+                    reference=f"surplus-quiz-global-{game.pk}-{host_player.player.pk}",
+                    metadata={"game": game.pk, "role": "hote", "type_de_surplus": "mise"},
+                    idempotency_key=f"surplus:{game.pk}:{host_player.player.pk}",
+                )
+            surplus_invite = proposition - eff
+            if surplus_invite > 0:
+                wallet_services.liberer_mise(
+                    user.portefeuille,
+                    surplus_invite,
+                    reference=f"surplus-quiz-global-{game.pk}-{user.pk}",
+                    metadata={"game": game.pk, "role": "invite", "type_de_surplus": "mise"},
+                    idempotency_key=f"surplus:{game.pk}:{user.pk}",
+                )
+            wallet_services.engager_mise(
+                host_player.player.portefeuille if host_player else user.portefeuille,
+                eff,
+                reference=f"engage-quiz-global-{game.pk}-hote",
+                metadata={"game": game.pk},
+            )
+            wallet_services.engager_mise(
+                user.portefeuille,
+                eff,
+                reference=f"engage-quiz-global-{game.pk}-{user.pk}",
+                metadata={"game": game.pk},
+            )
 
-    # ── Diffusion WebSocket ──
-    _notify(game, "PLAYER_JOINED")
-    _notify(game, "GAME_STARTED")
-    _notify(game, "THEME_SELECTION_STARTED")
+        # ── Diffusion WebSocket ──
+        _notify(game, "PLAYER_JOINED")
+        _notify(game, "GAME_STARTED")
+        _notify(game, "THEME_SELECTION_STARTED")
 
-    # Notifier l'hôte via WebSocket de notifications
-    try:
-        channel_layer = get_channel_layer()
-        host_player = game.players.filter(seat="A").select_related("player").first()
-        if host_player:
-            async_to_sync(channel_layer.group_send)(
-                f"notifications_{host_player.player_id}",
-                {
-                    "type": "notify",
-                    "data": {
-                        "type": "quiz_global.invite_accepted",
-                        "game_id": game.pk,
-                        "host_id": host_player.player_id,
-                        "invite_id": user.pk,
-                        "invite_pseudo": user.pseudo,
+        # Notifier l'hôte via WebSocket de notifications
+        try:
+            channel_layer = get_channel_layer()
+            host_player = game.players.filter(seat="A").select_related("player").first()
+            if host_player:
+                async_to_sync(channel_layer.group_send)(
+                    f"notifications_{host_player.player_id}",
+                    {
+                        "type": "notify",
+                        "data": {
+                            "type": "quiz_global.invite_accepted",
+                            "game_id": game.pk,
+                            "host_id": host_player.player_id,
+                            "invite_id": user.pk,
+                            "invite_pseudo": user.pseudo,
+                        },
                     },
-                },
-            )
-    except Exception as e:
-        logger.error(f"Erreur diffusion notification acceptation quiz global: {e}")
+                )
+        except Exception as e:
+            logger.error(f"Erreur diffusion notification acceptation quiz global: {e}")
 
-    return game
+        return game
 
 
 def _lock_game(game_id: int) -> QuizGlobalGame:
@@ -932,6 +1004,7 @@ def revanche_game(user, game_id: int, target_questions: int | None = None) -> Qu
 
 
 def list_waiting_games():
+    expirer_parties_en_attente()
     return (
         QuizGlobalGame.objects.filter(status=QuizGlobalGame.Status.WAITING, invited_player__isnull=True)
         .select_related("invited_player")
@@ -941,6 +1014,7 @@ def list_waiting_games():
 
 
 def list_my_games(user):
+    expirer_parties_en_attente()
     return (
         QuizGlobalGame.objects.filter(players__player=user)
         .exclude(status__in=[QuizGlobalGame.Status.FINISHED, QuizGlobalGame.Status.CANCELLED])
@@ -952,6 +1026,7 @@ def list_my_games(user):
 
 
 def mes_invitations(user):
+    expirer_parties_en_attente()
     return (
         QuizGlobalGame.objects.filter(status=QuizGlobalGame.Status.WAITING, invited_player=user)
         .select_related("invited_player")
@@ -968,5 +1043,9 @@ def get_game(game_id: int) -> QuizGlobalGame:
         .first()
     )
     if game is None:
+        raise MatchNotFoundError()
+    # Expiration ciblée (transaction dédiée, commitée) : le salon rejoint un get
+    # trop vieux est annulé puis traité comme introuvable.
+    if _expirer_salon_en_attente(game_id):
         raise MatchNotFoundError()
     return game

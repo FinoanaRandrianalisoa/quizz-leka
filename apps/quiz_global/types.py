@@ -69,6 +69,7 @@ class QuizGlobalState:
     phase_started_at: str | None
     phase_deadline: str | None
     server_time: str
+    created_at: str | None
     themes: list[QuizGlobalThemeAvailability]
     player_a: QuizGlobalPlayerView | None
     player_b: QuizGlobalPlayerView | None
@@ -130,6 +131,7 @@ def state_from_payload(payload: dict) -> QuizGlobalState:
         phase_started_at=payload.get("phaseStartedAt"),
         phase_deadline=payload.get("phaseDeadline"),
         server_time=payload["serverTime"],
+        created_at=payload.get("createdAt"),
         themes=[QuizGlobalThemeAvailability(**t) for t in payload.get("themes") or []],
         player_a=QuizGlobalPlayerView(**pa) if pa else None,
         player_b=QuizGlobalPlayerView(**pb) if pb else None,

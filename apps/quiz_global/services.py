@@ -1112,7 +1112,10 @@ def list_my_games(user):
 
 
 def mes_invitations(user):
-    expirer_parties_en_attente()
+    try:
+        expirer_parties_en_attente()
+    except Exception:
+        logger.exception("expirer_parties_en_attente a échoué dans mes_invitations")
     pendantes = QuizGlobalInvitation.objects.filter(
         receiver=user,
         status=QuizGlobalInvitation.Status.PENDING,

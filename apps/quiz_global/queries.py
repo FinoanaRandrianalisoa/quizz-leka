@@ -1,3 +1,5 @@
+import logging
+
 import strawberry
 from strawberry.types import Info
 
@@ -5,6 +7,8 @@ from apps.quiz_global import services
 from apps.quiz_global.active_game_service import get_active_game
 from apps.quiz_global.types import QuizGlobalState, to_state
 from common.graphql.permissions import get_current_user
+
+logger = logging.getLogger(__name__)
 
 
 @strawberry.type
@@ -40,4 +44,10 @@ class QuizGlobalQuery:
     @strawberry.field
     def mes_invitations_quiz_global(self, info: Info) -> list[QuizGlobalState]:
         user = get_current_user(info)
-        return [to_state(game, user) for game in services.mes_invitations(user)]
+        result = []
+        for game in services.mes_invitations(user):
+            try:
+                result.append(to_state(game, user))
+            except Exception:
+                logger.exception("Erreur sérialisation invitation game_id=%s", game.pk)
+        return result

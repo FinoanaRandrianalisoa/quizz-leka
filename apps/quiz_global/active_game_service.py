@@ -7,13 +7,27 @@ Responsabilités :
 - gérer le cycle de vie des invitations (PENDING -> ACCEPTED/EXPIRED/CANCELLED)
 """
 
-from django.db import transaction
+from django.db import connection, transaction
 
 from apps.quiz_global.models import QuizGlobalActivePlayer, QuizGlobalGame, QuizGlobalInvitation
 
 
+def _active_player_table_exists() -> bool:
+    """Vérifie si la table QuizGlobalActivePlayer existe (temporaire pour Railway)."""
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_name = 'quiz_global_quizglobalactiveplayer'
+            )
+        """)
+        return cursor.fetchone()[0]
+
+
 def get_active_game(user, exclude_game_id=None):
     """Retourne la partie réellement active du joueur (ou None)."""
+    if not _active_player_table_exists():
+        return None
     rows = QuizGlobalActivePlayer.objects.filter(player=user).select_related("game", "game__invited_player")
     if exclude_game_id is not None:
         rows = rows.exclude(game_id=exclude_game_id)
@@ -22,6 +36,8 @@ def get_active_game(user, exclude_game_id=None):
 
 
 def has_active_game(user, exclude_game_id=None) -> bool:
+    if not _active_player_table_exists():
+        return False
     rows = QuizGlobalActivePlayer.objects.filter(player=user)
     if exclude_game_id is not None:
         rows = rows.exclude(game_id=exclude_game_id)
@@ -36,6 +52,9 @@ def reserve_player(user, game: QuizGlobalGame) -> QuizGlobalActivePlayer:
     ligne pour le même joueur : c'est la garantie ultime du "1 seule partie
     active par joueur", même en cas de course concurrente.
     """
+    if not _active_player_table_exists():
+        # Temporairement: retourner un objet factice si la table n'existe pas
+        return type('MockActivePlayer', (), {'game': game, 'player_id': user.pk})()
     row, created = QuizGlobalActivePlayer.objects.get_or_create(
         player=user,
         defaults={"game": game},
@@ -50,12 +69,14 @@ def reserve_player(user, game: QuizGlobalGame) -> QuizGlobalActivePlayer:
 
 
 def release_player(user) -> None:
-    QuizGlobalActivePlayer.objects.filter(player=user).delete()
+    if _active_player_table_exists():
+        QuizGlobalActivePlayer.objects.filter(player=user).delete()
 
 
 def release_players(game: QuizGlobalGame) -> None:
     """Libère tous les joueurs d'une partie (statut terminal)."""
-    QuizGlobalActivePlayer.objects.filter(game=game).delete()
+    if _active_player_table_exists():
+        QuizGlobalActivePlayer.objects.filter(game=game).delete()
 
 
 def _invalidate_invitations(game: QuizGlobalGame, status, exclude_id=None) -> int:

@@ -396,6 +396,7 @@ def _after_create_game(game, user, invited, target_questions, mise):
         logger.exception("Échec broadcast GAME_CREATED game=%s", game.pk)
     if invited is not None:
         try:
+            logger.info(f"Envoi notification Quiz Global à {invited.pseudo} (id={invited.pk}) pour game={game.pk}")
             envoyer_notification(
                 invited,
                 Notification.Type.DEFI_RECU,
@@ -405,6 +406,7 @@ def _after_create_game(game, user, invited, target_questions, mise):
                 reference_id=game.pk,
                 expediteur=user,
             )
+            logger.info(f"Notification Quiz Global envoyée avec succès à {invited.pseudo}")
         except Exception:
             logger.exception("Échec notification invitation game=%s", game.pk)
     else:

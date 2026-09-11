@@ -42,7 +42,7 @@ class QuizGlobalGame(TimeStampedModel):
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     # expired_at = models.DateTimeField(null=True, blank=True)  # Temporarily commented - Railway migrations not working
-    abandoned_at = models.DateTimeField(null=True, blank=True)
+    # abandoned_at = models.DateTimeField(null=True, blank=True)  # Temporarily commented - Railway migrations not working
 
     class Meta:
         ordering = ["-cree_le"]

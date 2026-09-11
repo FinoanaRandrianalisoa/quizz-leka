@@ -41,7 +41,7 @@ class QuizGlobalGame(TimeStampedModel):
     phase_deadline = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
-    # expired_at = models.DateTimeField(null=True, blank=True)  # Temporarily commented due to Railway migration issue
+    expired_at = models.DateTimeField(null=True, blank=True)
     abandoned_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:

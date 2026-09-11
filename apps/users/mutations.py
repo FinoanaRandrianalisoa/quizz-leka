@@ -134,8 +134,47 @@ def resolve_changer_role(info: Info, utilisateur_id: strawberry.ID, role: str) -
     return cible
 
 
+def resolve_desactiver_utilisateur(info: Info, utilisateur_id: strawberry.ID) -> UtilisateurType:
+    admin = require_admin(info)
+    try:
+        cible = Utilisateur.objects.get(pk=int(utilisateur_id))
+    except (Utilisateur.DoesNotExist, ValueError, TypeError):
+        raise NotFoundError("Utilisateur introuvable.")
+    if cible.pk == admin.pk:
+        raise PermissionDeniedError("Vous ne pouvez pas désactiver votre propre compte.")
+    cible.is_active = False
+    cible.save(update_fields=["is_active"])
+    return cible
+
+
+def resolve_activer_utilisateur(info: Info, utilisateur_id: strawberry.ID) -> UtilisateurType:
+    admin = require_admin(info)
+    try:
+        cible = Utilisateur.objects.get(pk=int(utilisateur_id))
+    except (Utilisateur.DoesNotExist, ValueError, TypeError):
+        raise NotFoundError("Utilisateur introuvable.")
+    cible.is_active = True
+    cible.save(update_fields=["is_active"])
+    return cible
+
+
+def resolve_supprimer_utilisateur(info: Info, utilisateur_id: strawberry.ID) -> bool:
+    admin = require_admin(info)
+    try:
+        cible = Utilisateur.objects.get(pk=int(utilisateur_id))
+    except (Utilisateur.DoesNotExist, ValueError, TypeError):
+        raise NotFoundError("Utilisateur introuvable.")
+    if cible.pk == admin.pk:
+        raise PermissionDeniedError("Vous ne pouvez pas supprimer votre propre compte.")
+    cible.delete()
+    return True
+
+
 @strawberry.type
 class UsersMutation:
     regenerer_code_parrain: UtilisateurType = strawberry.field(resolver=resolve_regenerate_parrain)
     update_profil: UtilisateurType = strawberry.field(resolver=resolve_update_profil)
     changer_role: UtilisateurType = strawberry.field(resolver=resolve_changer_role)
+    desactiver_utilisateur: UtilisateurType = strawberry.field(resolver=resolve_desactiver_utilisateur)
+    activer_utilisateur: UtilisateurType = strawberry.field(resolver=resolve_activer_utilisateur)
+    supprimer_utilisateur: bool = strawberry.field(resolver=resolve_supprimer_utilisateur)

@@ -19,6 +19,7 @@ class QuizGlobalMutation:
     def creer_partie_quiz_global(self, info: Info, target_questions: int, invite_id: int | None = None, mise: Decimal = Decimal("0")) -> QuizGlobalState:
         user = get_current_user(info)
         game = services.create_game(user, target_questions, invite_id, mise)
+        services._after_create_game(game, user, game.invited_player, target_questions, mise)
         return to_state(game, user)
 
     @strawberry.mutation

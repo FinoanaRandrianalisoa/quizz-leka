@@ -382,20 +382,36 @@ def create_game(user, target_questions: int, invite_id: int | None = None, mise:
             metadata={"game": game.pk, "role": "hote"},
             idempotency_key=f"reserve:{game.pk}:{user.pk}",
         )
-    _notify(game, "GAME_CREATED")
-    if invited is not None:
-        envoyer_notification(
-            invited,
-            Notification.Type.DEFI_RECU,
-            "Invitation Quizz Global",
-            f"{user.pseudo} vous invite à un duel Quizz Global de {target_questions} questions"
-            + (f" (mise {mise} Ar)." if mise > 0 else "."),
-            reference_id=game.pk,
-            expediteur=user,
-        )
-    else:
-        publish_open_game(user, game)
     return game
+
+
+def _after_create_game(game, user, invited, target_questions, mise):
+    """Effets secondaires après création (notifications / broadcast).
+
+    Appelé hors transaction pour ne pas compromettre la création du salon.
+    """
+    try:
+        _notify(game, "GAME_CREATED")
+    except Exception:
+        logger.exception("Échec broadcast GAME_CREATED game=%s", game.pk)
+    if invited is not None:
+        try:
+            envoyer_notification(
+                invited,
+                Notification.Type.DEFI_RECU,
+                "Invitation Quizz Global",
+                f"{user.pseudo} vous invite à un duel Quizz Global de {target_questions} questions"
+                + (f" (mise {mise} Ar)." if mise > 0 else "."),
+                reference_id=game.pk,
+                expediteur=user,
+            )
+        except Exception:
+            logger.exception("Échec notification invitation game=%s", game.pk)
+    else:
+        try:
+            publish_open_game(user, game)
+        except Exception:
+            logger.exception("Échec publication salon ouvert game=%s", game.pk)
 
 
 def publish_open_game(user, game: QuizGlobalGame) -> Publication:

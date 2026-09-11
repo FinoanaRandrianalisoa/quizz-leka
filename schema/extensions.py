@@ -1,10 +1,14 @@
 """Extensions GraphQL : limites (depth/tokens/aliases) et normalisation des erreurs."""
 
+import logging
+
 from graphql.error import GraphQLError
 from strawberry.extensions import SchemaExtension
 
 from common.graphql.errors import DomainError
 from common.graphql.errors_handler import domain_to_extensions
+
+logger = logging.getLogger(__name__)
 
 
 class ErrorNormalizer(SchemaExtension):
@@ -39,6 +43,12 @@ class ErrorNormalizer(SchemaExtension):
                 traités.append(error)
                 continue
             # Exception non prévue : message générique, aucune fuite d'information.
+            logger.error(
+                "GraphQL INTERNAL_ERROR (path=%s): %s",
+                error.path,
+                original,
+                exc_info=original,
+            )
             traités.append(
                 GraphQLError(
                     message="Erreur interne, veuillez réessayer.",

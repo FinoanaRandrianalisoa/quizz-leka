@@ -19,6 +19,7 @@ class UtilisateurType:
     role: strawberry.auto
     en_ligne: strawberry.auto
     date_joined: strawberry.auto
+    is_active: strawberry.auto
 
     @strawberry.field
     def photo_profil(self, info: Info) -> str | None:

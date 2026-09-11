@@ -16,12 +16,24 @@ class QuizGlobalQuery:
     @strawberry.field
     def parties_quiz_global_disponibles(self, info: Info) -> list[QuizGlobalState]:
         user = get_current_user(info)
-        return [to_state(game, user) for game in services.list_waiting_games()]
+        result = []
+        for game in services.list_waiting_games():
+            try:
+                result.append(to_state(game, user))
+            except Exception:
+                logger.exception("Erreur sérialisation salon disponible game_id=%s", game.pk)
+        return result
 
     @strawberry.field
     def mes_parties_quiz_global(self, info: Info) -> list[QuizGlobalState]:
         user = get_current_user(info)
-        return [to_state(game, user) for game in services.list_my_games(user)]
+        result = []
+        for game in services.list_my_games(user):
+            try:
+                result.append(to_state(game, user))
+            except Exception:
+                logger.exception("Erreur sérialisation de mes parties game_id=%s", game.pk)
+        return result
 
     @strawberry.field
     def my_active_game(self, info: Info) -> QuizGlobalState | None:
@@ -45,9 +57,12 @@ class QuizGlobalQuery:
     def mes_invitations_quiz_global(self, info: Info) -> list[QuizGlobalState]:
         user = get_current_user(info)
         result = []
-        for game in services.mes_invitations(user):
-            try:
-                result.append(to_state(game, user))
-            except Exception:
-                logger.exception("Erreur sérialisation invitation game_id=%s", game.pk)
+        try:
+            for game in services.mes_invitations(user):
+                try:
+                    result.append(to_state(game, user))
+                except Exception:
+                    logger.exception("Erreur sérialisation invitation game_id=%s", game.pk)
+        except Exception:
+            logger.exception("Erreur lecture des invitations Quizz Global pour user=%s", user.pk)
         return result

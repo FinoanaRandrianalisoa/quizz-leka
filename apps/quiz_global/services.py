@@ -483,7 +483,7 @@ def expirer_parties_en_attente(expiration_secondes: int = WAITING_EXPIRY_SECONDS
     """Expire automatiquement les salons WAITING plus vieux que `expiration_secondes`.
 
     Le statut devient EXPIRED (inactif) : le joueur est libéré immédiatement.
-    Appelé périodiquement (Celery beat) et paresseusement (list/get) pour garantir
+    Appelé périodiquement (Celery beat) et ponctuellement (get/join) pour garantir
     qu'aucun salon ne reste bloquant plus longtemps que la durée d'attente.
     """
     cutoff = timezone.now() - timedelta(seconds=expiration_secondes)
@@ -494,8 +494,14 @@ def expirer_parties_en_attente(expiration_secondes: int = WAITING_EXPIRY_SECONDS
         ).values_list("pk", flat=True)
     )
     for game_id in expired_ids:
-        game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
-        _expirer_salon(game)
+        try:
+            game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
+            _expirer_salon(game)
+        except Exception:
+            logger.exception(
+                "Échec expiration salon Quizz Global game_id=%s (ignoré, suite du balayage)",
+                game_id,
+            )
     logger.info("Expiration salons Quizz Global : %d partie(s) expirée(s)", len(expired_ids))
     return len(expired_ids)
 
@@ -1108,7 +1114,6 @@ def revanche_game(user, game_id: int, target_questions: int | None = None) -> Qu
 
 
 def list_waiting_games():
-    expirer_parties_en_attente()
     return (
         QuizGlobalGame.objects.filter(status=QuizGlobalGame.Status.WAITING, invited_player__isnull=True)
         .select_related("invited_player")
@@ -1118,7 +1123,6 @@ def list_waiting_games():
 
 
 def list_my_games(user):
-    expirer_parties_en_attente()
     return (
         QuizGlobalGame.objects.filter(players__player=user)
         .exclude(status__in=INACTIVE_STATUSES)
@@ -1130,10 +1134,6 @@ def list_my_games(user):
 
 
 def mes_invitations(user):
-    try:
-        expirer_parties_en_attente()
-    except Exception:
-        logger.exception("expirer_parties_en_attente a échoué dans mes_invitations")
     pendantes = QuizGlobalInvitation.objects.filter(
         receiver=user,
         status=QuizGlobalInvitation.Status.PENDING,

@@ -1,54 +1,58 @@
-# Generated manually to fix missing tables and columns on Railway
+# Generated manually to fix missing tables and columns on Railway using direct SQL
 
-import django.db.models.deletion
-from django.conf import settings
-from django.db import migrations, models
+from django.db import migrations
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
         ('quiz_global', '0004_quizglobalgame_abandoned_at_and_more'),
-        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
-        # Ensure expired_at field exists
-        migrations.AddField(
-            model_name='quizglobalgame',
-            name='expired_at',
-            field=models.DateTimeField(blank=True, null=True),
+        # Add expired_at column if it doesn't exist
+        migrations.RunSQL(
+            sql="""
+                ALTER TABLE quiz_global_quizglobalgame
+                ADD COLUMN IF NOT EXISTS expired_at TIMESTAMP WITH TIME ZONE;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        # Ensure abandoned_at field exists
-        migrations.AddField(
-            model_name='quizglobalgame',
-            name='abandoned_at',
-            field=models.DateTimeField(blank=True, null=True),
+        # Add abandoned_at column if it doesn't exist
+        migrations.RunSQL(
+            sql="""
+                ALTER TABLE quiz_global_quizglobalgame
+                ADD COLUMN IF NOT EXISTS abandoned_at TIMESTAMP WITH TIME ZONE;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        # Ensure QuizGlobalActivePlayer table exists
-        migrations.CreateModel(
-            name='QuizGlobalActivePlayer',
-            fields=[
-                ('player', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, primary_key=True, related_name='quiz_global_active', serialize=False, to=settings.AUTH_USER_MODEL)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('game', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='active_players', to='quiz_global.quizglobalgame')),
-            ],
+        # Create QuizGlobalActivePlayer table if it doesn't exist
+        migrations.RunSQL(
+            sql="""
+                CREATE TABLE IF NOT EXISTS quiz_global_quizglobalactiveplayer (
+                    player_id INTEGER NOT NULL PRIMARY KEY REFERENCES users_utilisateur(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                    game_id INTEGER NOT NULL REFERENCES quiz_global_quizglobalgame(id) ON DELETE CASCADE
+                );
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        # Ensure QuizGlobalInvitation table exists
-        migrations.CreateModel(
-            name='QuizGlobalInvitation',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('status', models.CharField(choices=[('PENDING', 'En attente'), ('ACCEPTED', 'Acceptée'), ('EXPIRED', 'Expirée'), ('CANCELLED', 'Annulée')], default='PENDING', max_length=12)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('responded_at', models.DateTimeField(blank=True, null=True)),
-                ('game', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='invitations', to='quiz_global.quizglobalgame')),
-                ('receiver', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='quiz_global_invitations_received', to=settings.AUTH_USER_MODEL)),
-                ('sender', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='quiz_global_invitations_sent', to=settings.AUTH_USER_MODEL)),
-            ],
-            options={
-                'indexes': [models.Index(fields=['receiver', 'status'], name='quiz_global_receive_72b972_idx'), models.Index(fields=['game', 'status'], name='quiz_global_game_id_a562c8_idx')],
-                'constraints': [models.UniqueConstraint(fields=('game', 'receiver'), name='quiz_global_unique_invitee')],
-            },
+        # Create QuizGlobalInvitation table if it doesn't exist
+        migrations.RunSQL(
+            sql="""
+                CREATE TABLE IF NOT EXISTS quiz_global_quizglobalinvitation (
+                    id SERIAL NOT NULL PRIMARY KEY,
+                    status VARCHAR(12) NOT NULL DEFAULT 'PENDING',
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                    responded_at TIMESTAMP WITH TIME ZONE,
+                    game_id INTEGER NOT NULL REFERENCES quiz_global_quizglobalgame(id) ON DELETE CASCADE,
+                    receiver_id INTEGER NOT NULL REFERENCES users_utilisateur(id) ON DELETE CASCADE,
+                    sender_id INTEGER NOT NULL REFERENCES users_utilisateur(id) ON DELETE CASCADE,
+                    CONSTRAINT quiz_global_unique_invitee UNIQUE (game_id, receiver_id)
+                );
+                CREATE INDEX IF NOT EXISTS quiz_global_receive_72b972_idx ON quiz_global_quizglobalinvitation (receiver_id, status);
+                CREATE INDEX IF NOT EXISTS quiz_global_game_id_a562c8_idx ON quiz_global_quizglobalinvitation (game_id, status);
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
     ]

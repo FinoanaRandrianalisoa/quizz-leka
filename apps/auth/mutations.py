@@ -302,7 +302,8 @@ def resolve_forgot_password(info: Info, email: str) -> bool:
         expires_at=timezone.now() + timedelta(seconds=settings.PASSWORD_RESET_TTL),
         ip=getattr(info.context.request, "META", {}).get("REMOTE_ADDR"),
     )
-    send_password_reset_email(user.email, user.pseudo, code)
+    if not send_password_reset_email(user.email, user.pseudo, code):
+        raise EmailSendError()
     return True
 
 

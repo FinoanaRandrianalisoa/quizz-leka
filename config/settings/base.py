@@ -295,9 +295,9 @@ EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.smtp.Ema
 EMAIL_HOST = env("EMAIL_HOST", default="smtp.gmail.com")
 EMAIL_PORT = env.int("EMAIL_PORT", default=587)
 EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
-EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="randrianalisoafinoana@gmail.com")
-EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="cfca jmrh eutc cftg")
-DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="randrianalisoafinoana@gmail.com")
+EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default=EMAIL_HOST_USER or "noreply@quizz-leka.mg")
 
 # TTL codes de vérification email / reset mot de passe (secondes)
 EMAIL_VERIFICATION_TTL = env.int("EMAIL_VERIFICATION_TTL", default=900)  # 15 min

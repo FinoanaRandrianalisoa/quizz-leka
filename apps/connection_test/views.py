@@ -26,7 +26,7 @@ def _rate_limited(request):
         if count >= RATE_LIMIT_PER_MINUTE:
             return True
         cache.set(key, count + 1, timeout=RATE_WINDOW_SECONDS)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     return False
 

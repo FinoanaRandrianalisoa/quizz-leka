@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     "apps.social",
     "apps.discussions",
     "apps.moderation",
+    "apps.connection_test",
 ]
 
 MIDDLEWARE = [

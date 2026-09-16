@@ -15,6 +15,7 @@ from django.db import transaction
 from django.utils import timezone
 from strawberry.types import Info
 
+from apps.auth.email import generate_code, send_password_reset_email, send_verification_email
 from apps.auth.jwt import generate_access_token, generate_refresh_token, decode_token
 from apps.auth.models import RefreshToken, OTPRequest
 from apps.auth.otp import generate_otp, send_otp
@@ -29,6 +30,9 @@ from common.graphql.errors import (
     EmailAlreadyTakenError,
     PseudoAlreadyTakenError,
     ValidationError,
+    EmailSendError,
+    EmailAlreadyVerifiedError,
+    EmailNotFoundError,
 )
 from common.graphql.permissions import get_current_user
 
@@ -237,6 +241,100 @@ def resolve_request_otp(info: Info, destination: str) -> bool:
     return True
 
 
+def resolve_send_verification_email(info: Info) -> bool:
+    """Envoie un code de vérification à l'adresse email du compte connecté."""
+    user = get_current_user(info)
+    if not user.email:
+        raise ValidationError("Aucune adresse email n'est associée à ce compte.")
+    if user.email_verifie:
+        raise EmailAlreadyVerifiedError()
+    code = generate_code()
+    OTPRequest.objects.create(
+        utilisateur=user,
+        code_hash=_hash(code),
+        destination=user.email,
+        usage="email_verify",
+        expires_at=timezone.now() + timedelta(seconds=settings.EMAIL_VERIFICATION_TTL),
+        ip=getattr(info.context.request, "META", {}).get("REMOTE_ADDR"),
+    )
+    if not send_verification_email(user.email, user.pseudo, code):
+        raise EmailSendError()
+    return True
+
+
+def resolve_verify_email(info: Info, code: str) -> bool:
+    """Valide l'adresse email du compte connecté avec le code reçu."""
+    user = get_current_user(info)
+    if user.email_verifie:
+        raise EmailAlreadyVerifiedError()
+    if not user.email:
+        raise ValidationError("Aucune adresse email n'est associée à ce compte.")
+    latest = (
+        OTPRequest.objects.filter(utilisateur=user, destination=user.email, usage="email_verify")
+        .order_by("-cree_le")
+        .first()
+    )
+    if not latest or latest.utilise or latest.expires_at < timezone.now() or not secrets.compare_digest(latest.code_hash, _hash(code)):
+        raise InvalidOtpError()
+    latest.utilise = True
+    latest.save(update_fields=["utilise"])
+    user.email_verifie = True
+    user.save(update_fields=["email_verifie"])
+    return True
+
+
+def resolve_forgot_password(info: Info, email: str) -> bool:
+    """Envoie un code de réinitialisation de mot de passe à l'adresse email."""
+    adresse = _sanitize_text(email, 254).lower()
+    user = (
+        Utilisateur.objects.filter(email__iexact=adresse)
+        .order_by("-cree_le")
+        .first()
+    )
+    if user is None:
+        raise EmailNotFoundError()
+    code = generate_code()
+    OTPRequest.objects.create(
+        utilisateur=user,
+        code_hash=_hash(code),
+        destination=user.email,
+        usage="password_reset",
+        expires_at=timezone.now() + timedelta(seconds=settings.PASSWORD_RESET_TTL),
+        ip=getattr(info.context.request, "META", {}).get("REMOTE_ADDR"),
+    )
+    send_password_reset_email(user.email, user.pseudo, code)
+    return True
+
+
+def resolve_reset_password(info: Info, email: str, code: str, new_password: str) -> bool:
+    """Réinitialise le mot de passe avec le code reçu par email."""
+    adresse = _sanitize_text(email, 254).lower()
+    user = (
+        Utilisateur.objects.filter(email__iexact=adresse)
+        .order_by("-cree_le")
+        .first()
+    )
+    if user is None:
+        raise EmailNotFoundError()
+    latest = (
+        OTPRequest.objects.filter(utilisateur=user, destination=user.email, usage="password_reset")
+        .order_by("-cree_le")
+        .first()
+    )
+    if not latest or latest.utilise or latest.expires_at < timezone.now() or not secrets.compare_digest(latest.code_hash, _hash(code)):
+        raise InvalidOtpError()
+    if len(new_password) < 8:
+        raise ValidationError("Le mot de passe doit contenir au moins 8 caractères.")
+    latest.utilise = True
+    latest.save(update_fields=["utilise"])
+    user.set_password(new_password)
+    user.email_verifie = True
+    user.en_ligne = False
+    user.save(update_fields=["password", "email_verifie", "en_ligne"])
+    RefreshToken.objects.filter(utilisateur=user).update(revoque=True)
+    return True
+
+
 def resolve_verify_otp(info: Info, destination: str, code: str) -> VerifyOtpPayload:
     user = get_current_user(info)
     latest = (
@@ -254,6 +352,7 @@ def resolve_verify_otp(info: Info, destination: str, code: str) -> VerifyOtpPayl
         "exp": int((timezone.now() + timedelta(seconds=300)).timestamp()),
     }
     import jwt
+
     token = jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
     return VerifyOtpPayload(token=token, expires_in=300)
 
@@ -266,4 +365,10 @@ class AuthMutation:
     logout: bool = strawberry.field(resolver=resolve_logout)
     request_otp: bool = strawberry.field(resolver=resolve_request_otp)
     verify_otp: VerifyOtpPayload = strawberry.field(resolver=resolve_verify_otp, name="verifyOtp")
+    send_verification_email: bool = strawberry.field(
+        resolver=resolve_send_verification_email, name="sendVerificationEmail"
+    )
+    verify_email: bool = strawberry.field(resolver=resolve_verify_email, name="verifyEmail")
+    forgot_password: bool = strawberry.field(resolver=resolve_forgot_password, name="forgotPassword")
+    reset_password: bool = strawberry.field(resolver=resolve_reset_password, name="resetPassword")
 

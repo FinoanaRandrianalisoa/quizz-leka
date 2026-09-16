@@ -41,6 +41,21 @@ class InvalidOtpError(DomainError):
     default_message = "Code de vérification invalide ou expiré."
 
 
+class EmailSendError(DomainError):
+    code = "AUTH_EMAIL_SEND_FAILED"
+    default_message = "Impossible d'envoyer l'email de vérification. Réessayez plus tard."
+
+
+class EmailAlreadyVerifiedError(DomainError):
+    code = "AUTH_EMAIL_ALREADY_VERIFIED"
+    default_message = "Votre adresse email est déjà vérifiée."
+
+
+class EmailNotFoundError(DomainError):
+    code = "AUTH_EMAIL_NOT_FOUND"
+    default_message = "Aucun compte n'est associé à cette adresse email."
+
+
 class EmailNotVerifiedError(DomainError):
     code = "AUTH_EMAIL_NOT_VERIFIED"
     default_message = "Adresse email non vérifiée."

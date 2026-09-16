@@ -60,6 +60,17 @@ class QuizGlobalMutation:
         return services.refuser_invitation(user, game_id)
 
     @strawberry.mutation
+    def inviter_partie_quiz_global(self, info: Info, game_id: int, invite_id: int) -> QuizGlobalState:
+        """Invite un joueur supplémentaire dans un salon WAITING du créateur.
+
+        Permet d'envoyer des invitations à plusieurs joueurs pour le même salon :
+        le premier acceptant obtient la place B.
+        """
+        user = get_current_user(info)
+        game = services.inviter_joueur(user, game_id, invite_id)
+        return to_state(game, user)
+
+    @strawberry.mutation
     def revanche_partie_quiz_global(self, info: Info, game_id: int) -> QuizGlobalState:
         """Recrée une partie immédiate contre le même adversaire après une partie terminée."""
         user = get_current_user(info)

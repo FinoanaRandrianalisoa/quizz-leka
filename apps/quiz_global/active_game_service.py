@@ -13,15 +13,18 @@ from apps.quiz_global.models import QuizGlobalActivePlayer, QuizGlobalGame, Quiz
 
 
 def _active_player_table_exists() -> bool:
-    """Vérifie si la table QuizGlobalActivePlayer existe (Railway workaround)."""
-    with connection.cursor() as cursor:
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables
-                WHERE table_name = 'quiz_global_quizglobalactiveplayer'
-            )
-        """)
-        return cursor.fetchone()[0]
+    """Vérifie si la table QuizGlobalActivePlayer existe (Railway workaround).
+
+    Utilise l'introspection Django (compatible SQLite + Postgres) au lieu du
+    ``information_schema`` réservé à Postgres, pour que les tests SQLite
+    puissent s'exécuter.
+    """
+    try:
+        connection.ensure_connection()
+        table_names = connection.introspection.table_names()
+        return QuizGlobalActivePlayer._meta.db_table in table_names
+    except Exception:
+        return False
 
 
 def get_active_game(user, exclude_game_id=None):

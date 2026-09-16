@@ -66,3 +66,15 @@ class QuizGlobalQuery:
         except Exception:
             logger.exception("Erreur lecture des invitations Quizz Global pour user=%s", user.pk)
         return result
+
+    @strawberry.field
+    def historique_parties_quiz_global(self, info: Info) -> list[QuizGlobalState]:
+        """Toutes les parties du joueur, actives et historiques (avec détail)."""
+        user = get_current_user(info)
+        result = []
+        for game in services.list_my_games_history(user):
+            try:
+                result.append(to_state(game, user))
+            except Exception:
+                logger.exception("Erreur sérialisation historique game_id=%s", game.pk)
+        return result

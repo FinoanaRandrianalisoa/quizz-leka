@@ -11,6 +11,7 @@ urlpatterns = [
     path("graphql/", graphql_app),
     path("api/auth/", include("apps.auth.urls")),
     path("api/webhooks/", include("apps.wallet.webhook_urls")),
+    path("api/connection-test/", include("apps.connection_test.urls")),
     path("healthcheck/", lambda r: HttpResponse("ok")),
 ]
 

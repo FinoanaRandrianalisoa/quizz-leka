@@ -2,9 +2,10 @@ from django.urls import path
 
 from apps.discussions.consumers import CityChatConsumer, NotificationConsumer
 from apps.matches.consumers import MatchConsumer, PartiesConsumer, RpsConsumer, PenaltyConsumer
-from apps.quiz_global.consumers import QuizGlobalConsumer
+from apps.quiz_global.consumers import QuizGlobalConsumer, QuizGlobalLobbyConsumer
 
 websocket_urlpatterns = [
+    path("ws/quiz-global/lobby/", QuizGlobalLobbyConsumer.as_asgi()),
     path("ws/quiz-global/<int:game_id>/", QuizGlobalConsumer.as_asgi()),
     path("ws/parties/", PartiesConsumer.as_asgi()),
     path("ws/rps/<str:match_id>/", RpsConsumer.as_asgi()),

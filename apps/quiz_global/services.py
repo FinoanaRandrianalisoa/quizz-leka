@@ -121,6 +121,54 @@ def _broadcast(game_id: int, payload: dict, user_id: int | None = None) -> None:
         return
 
 
+LOBBY_GROUP = "quiz_global_lobby"
+
+
+def build_lobby_state(user) -> dict:
+    """Snapshot complet du lobby vu par `user`.
+
+    Bloc public (parties en cours + salons ouverts) + bloc personnel
+    (mes parties, ma partie active, invitations reçues). C'est le premier
+    message envoyé par le WebSocket du lobby à la connexion.
+    """
+    active = get_active_game(user)
+    return {
+        "event": "LOBBY_STATE",
+        "serverTime": timezone.now().isoformat(),
+        "partiesActives": [serialize_game_public(g) for g in list_active_games()],
+        "partiesEnAttente": [serialize_game(g, user) for g in list_waiting_games()],
+        "mesParties": [serialize_game(g, user) for g in list_my_games(user)],
+        "maPartieActive": serialize_game(active, user) if active else None,
+        "invitations": [serialize_game(g, user) for g in mes_invitations(user)],
+    }
+
+
+def broadcast_lobby() -> None:
+    """Publie en temps réel le bloc public du lobby (parties à l'écran).
+
+    Seules les données publiques (parties actives + salons ouverts) sont
+    diffusées au groupe : les données personnelles sont recalculées par chaque
+    connexion individuelle sur `LOBBY_STATE`.
+    """
+    channel_layer = get_channel_layer()
+    if channel_layer is None:
+        return
+    try:
+        payload = {
+            "event": "LOBBY_UPDATED",
+            "serverTime": timezone.now().isoformat(),
+            "partiesActives": [serialize_game_public(g) for g in list_active_games()],
+            "partiesEnAttente": [serialize_game(g, None) for g in list_waiting_games()],
+        }
+        async_to_sync(channel_layer.group_send)(
+            LOBBY_GROUP,
+            {"type": "lobby.event", "data": payload},
+        )
+    except Exception:
+        logger.exception("Échec broadcast lobby Quizz Global")
+        return
+
+
 def _schedule_tick(game_id: int, when) -> None:
     delay = max(0, int((when - timezone.now()).total_seconds()))
     try:
@@ -414,6 +462,10 @@ def _after_create_game(game, user, invited, target_questions, mise):
             publish_open_game(user, game)
         except Exception:
             logger.exception("Échec publication salon ouvert game=%s", game.pk)
+    try:
+        broadcast_lobby()
+    except Exception:
+        logger.exception("Échec broadcast lobby (création) game=%s", game.pk)
 
 
 def publish_open_game(user, game: QuizGlobalGame) -> Publication:
@@ -501,6 +553,7 @@ def _expirer_salon(game: QuizGlobalGame) -> None:
             reference_id=game.pk,
             expediteur=host.player if host else None,
         )
+    broadcast_lobby()
 
 
 @transaction.atomic
@@ -566,6 +619,8 @@ def abandonner_parties_bloquees(grace_secondes: int = ABANDON_TIMEOUT_SECONDS) -
         release_players(game)
         _notify(game, "GAME_ABANDONED")
     logger.info("Abandon des parties bloquées : %d partie(s)", len(stuck_ids))
+    if stuck_ids:
+        broadcast_lobby()
     return len(stuck_ids)
 
 
@@ -642,6 +697,7 @@ def annuler_game(user, game_id: int) -> bool:
             reference_id=game.pk,
             expediteur=user,
         )
+    broadcast_lobby()
     return True
 
 
@@ -670,6 +726,7 @@ def refuser_invitation(user, game_id: int) -> bool:
             reference_id=game.pk,
             expediteur=user,
         )
+    broadcast_lobby()
     return True
 
 
@@ -924,6 +981,7 @@ def join_game(user, game_id: int, mise: Decimal | None = None) -> QuizGlobalGame
         except Exception as e:
             logger.error(f"Erreur diffusion notification acceptation quiz global: {e}")
 
+        broadcast_lobby()
         return game
 
 
@@ -961,6 +1019,7 @@ def _create_game_question(game: QuizGlobalGame, theme: Theme, is_tie_break: bool
     _notify(game, "THEME_SELECTED", extra={"chosenTheme": theme.nom, "chosenBySeat": game.active_seat})
     _notify(game, "QUESTION_READING_STARTED")
     _schedule_tick(game.pk, game.phase_deadline)
+    broadcast_lobby()
     return gq
 
 
@@ -1032,6 +1091,7 @@ def _start_answering(game: QuizGlobalGame) -> None:
     game.save()
     _notify(game, "ANSWERING_STARTED")
     _schedule_tick(game.pk, game.phase_deadline)
+    broadcast_lobby()
 
 
 def _finish_question(game: QuizGlobalGame) -> None:
@@ -1057,6 +1117,7 @@ def _finish_question(game: QuizGlobalGame) -> None:
     _notify(game, "QUESTION_FINISHED")
     _notify(game, "SCORE_UPDATED")
     _schedule_tick(game.pk, game.phase_deadline)
+    broadcast_lobby()
 
 
 def _advance_after_result(game: QuizGlobalGame) -> None:
@@ -1085,6 +1146,7 @@ def _advance_after_result(game: QuizGlobalGame) -> None:
         game.save()
         _notify(game, "NEXT_TURN")
         _notify(game, "THEME_SELECTION_STARTED")
+        broadcast_lobby()
         return
 
     if score_a == score_b:
@@ -1148,6 +1210,7 @@ def _finish_game(game: QuizGlobalGame, score_a: int, score_b: int, draw: bool = 
     _invalidate_stale_invitations(game)
     release_players(game)
     _notify(game, "GAME_FINISHED")
+    broadcast_lobby()
 
 
 @transaction.atomic
@@ -1247,6 +1310,7 @@ def revanche_game(user, game_id: int, target_questions: int | None = None) -> Qu
         reference_id=new_game.pk,
         expediteur=user,
     )
+    broadcast_lobby()
     return new_game
 
 

@@ -1,3 +1,4 @@
+import hashlib
 import time
 
 from django.core.cache import cache
@@ -8,7 +9,10 @@ from django.views.decorators.http import require_GET, require_POST
 MAX_DOWNLOAD_BYTES = 256 * 1024
 DEFAULT_DOWNLOAD_BYTES = 128 * 1024
 MAX_UPLOAD_BYTES = 128 * 1024
-RATE_LIMIT_PER_MINUTE = 80
+# Le moniteur de connexion du front émet ~16 requêtes/minute/tab.
+# Sur un NAT partagé (4G, entreprise…) de nombreux utilisateurs partagent la
+# même IP : on doit laisser une marge confortable pour ne pas blocker les pings.
+RATE_LIMIT_PER_MINUTE = 240
 RATE_WINDOW_SECONDS = 60
 
 
@@ -19,8 +23,24 @@ def _client_ip(request):
     return request.META.get("REMOTE_ADDR", "unknown")
 
 
+def _rate_limit_key(request):
+    """Clé par (IP + empreinte User-Agent).
+
+    Tous les clients derrière un même NAT partagent l'IP : on désamorce avec
+    l'agent pour répartir les quotas plutôt que de bloquer tout le monde d'un
+    coup dès qu'un des utilisateurs dépasse le budget.
+    """
+    ip = _client_ip(request)
+    try:
+        agent = request.META.get("HTTP_USER_AGENT", "").encode("utf-8", "ignore")
+        digest = hashlib.sha256(agent).hexdigest()[:12]
+    except Exception:  # noqa: BLE001
+        digest = "unknown"
+    return f"connection-test:{ip}:{digest}"
+
+
 def _rate_limited(request):
-    key = f"connection-test:{_client_ip(request)}"
+    key = _rate_limit_key(request)
     try:
         count = cache.get(key, 0)
         if count >= RATE_LIMIT_PER_MINUTE:

@@ -5,7 +5,17 @@ from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
 from apps.quiz_global.errors import QuizGlobalError
 from apps.quiz_global.models import QuizGlobalGame
-from apps.quiz_global.services import READING_DURATION, ANSWERING_DURATION, RESULT_DURATION, select_theme, serialize_game, submit_answer, tick
+from apps.quiz_global.services import (
+    ANSWERING_DURATION,
+    LOBBY_GROUP,
+    READING_DURATION,
+    RESULT_DURATION,
+    build_lobby_state,
+    select_theme,
+    serialize_game,
+    submit_answer,
+    tick,
+)
 
 
 class QuizGlobalConsumer(AsyncJsonWebsocketConsumer):
@@ -100,3 +110,41 @@ class QuizGlobalConsumer(AsyncJsonWebsocketConsumer):
             await database_sync_to_async(tick)(int(self.game_id))
         except Exception:
             return
+
+
+class QuizGlobalLobbyConsumer(AsyncJsonWebsocketConsumer):
+    """WebSocket du lobby Quizz Global.
+
+    Remplace le polling HTTP du lobby : à la connexion le serveur envoie un
+    `LOBBY_STATE` complet (parties en cours, salons ouverts, mes parties, ma
+    partie active, invitations) puis pousse un `LOBBY_UPDATED` dès qu'une
+    partie change d'état (création, join, choix de thème, score, fin…).
+    """
+
+    async def connect(self):
+        user = self.scope.get("user")
+        if not user or getattr(user, "is_anonymous", True):
+            await self.close()
+            return
+        self.user = user
+        await self.channel_layer.group_add(LOBBY_GROUP, self.channel_name)
+        await self.accept()
+        await self._send_snapshot()
+
+    async def disconnect(self, code):
+        await self.channel_layer.group_discard(LOBBY_GROUP, self.channel_name)
+
+    async def receive_json(self, content, **kwargs):
+        event = (content.get("event") or content.get("type") or "").upper()
+        if event in {"GET_STATE", "REFRESH", "RECONNECT"}:
+            await self._send_snapshot()
+
+    async def _send_snapshot(self):
+        try:
+            payload = await database_sync_to_async(build_lobby_state)(self.user)
+            await self.send_json(payload)
+        except Exception:
+            return
+
+    async def lobby_event(self, event):
+        await self.send_json(event.get("data", {}))

@@ -301,6 +301,10 @@ EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default=EMAIL_HOST_USER or "noreply@quizz-leka.mg")
 
+# Resend (API HTTPS) — prioritaire sur SMTP, indispensable sur Railway où le
+# SMTP sortant (25/465/587) est bloqué hors plan Pro.
+RESEND_API_KEY = env("RESEND_API_KEY", default="")
+
 # TTL codes de vérification email / reset mot de passe (secondes)
 EMAIL_VERIFICATION_TTL = env.int("EMAIL_VERIFICATION_TTL", default=900)  # 15 min
 PASSWORD_RESET_TTL = env.int("PASSWORD_RESET_TTL", default=900)  # 15 min

@@ -58,6 +58,7 @@ def _too_many():
     )
 
 
+@csrf_exempt
 @require_GET
 def ping(request):
     if _rate_limited(request):
@@ -65,6 +66,7 @@ def ping(request):
     return JsonResponse({"ok": True, "t": time.time()})
 
 
+@csrf_exempt
 @require_GET
 def download(request):
     if _rate_limited(request):

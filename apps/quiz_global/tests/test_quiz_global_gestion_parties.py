@@ -275,3 +275,64 @@ def test_graphql_inviter_et_historique(client):
     assert "errors" not in hist, hist
     assert len(hist["data"]["historiquePartiesQuizGlobal"]) == 1
     assert hist["data"]["historiquePartiesQuizGlobal"][0]["gameId"] == game_id
+
+
+@pytest.mark.django_db
+def test_graphql_parties_actives_publiques(client):
+    """partiesQuizGlobalActives liste les parties démarrées de tous les joueurs,
+    sans exposer la question ni les options (vue spectateur)."""
+    import json
+
+    def gql(query, token=None):
+        kwargs = {"content_type": "application/json"}
+        if token:
+            kwargs["HTTP_AUTHORIZATION"] = f"Bearer {token}"
+        r = client.post("/graphql/", data={"query": query}, **kwargs)
+        return json.loads(r.content)
+
+    def register(email, pseudo):
+        resp = gql(
+            f'mutation {{ register(input: {{ email: "{email}", pseudo: "{pseudo}", password: "MotDePasse1!" }}) {{ accessToken }} }}'
+        )
+        assert "errors" not in resp, resp
+        return resp["data"]["register"]["accessToken"]
+
+    tok_a = register("actg@quiz.mg", "ActAla")
+    tok_b = register("acth@quiz.mg", "ActBla")
+    tok_c = register("acti@quiz.mg", "ActCid")
+
+    # Salon WAITING (pas encore démarré) : ne doit PAS apparaître.
+    waiting = gql("mutation { creerPartieQuizGlobal(targetQuestions: 4) { gameId status } }", tok_a)
+    assert "errors" not in waiting, waiting
+
+    # Partie démarrée entre A et B.
+    started = gql(
+        f"mutation {{ inviterPartieQuizGlobal(gameId: {waiting['data']['creerPartieQuizGlobal']['gameId']}, inviteId: {Utilisateur.objects.get(email='acth@quiz.mg').pk}) {{ gameId }}}}",
+        tok_a,
+    )
+    assert "errors" not in started, started
+    joined = gql(
+        f"mutation {{ rejoindrePartieQuizGlobal(gameId: {waiting['data']['creerPartieQuizGlobal']['gameId']}) {{ status }} }}",
+        tok_b,
+    )
+    assert joined["data"]["rejoindrePartieQuizGlobal"]["status"] == "THEME_SELECTION"
+
+    # Un joueur tiers (C) voit la partie active : résumé public sans question.
+    actives = gql(
+        """{ partiesQuizGlobalActives { gameId status currentTurn targetQuestions playerA { pseudo score } playerB { pseudo score } } }""",
+        tok_c,
+    )
+    assert "errors" not in actives, actives
+    data = actives["data"]["partiesQuizGlobalActives"]
+    assert len(data) == 1
+    assert data[0]["status"] == "THEME_SELECTION"
+    assert {p["pseudo"] for p in (data[0]["playerA"], data[0]["playerB"])} == {"ActAla", "ActBla"}
+    assert "question" not in data[0]
+    assert set(data[0]) == {
+        "gameId",
+        "status",
+        "currentTurn",
+        "targetQuestions",
+        "playerA",
+        "playerB",
+    }

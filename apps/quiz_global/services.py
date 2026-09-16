@@ -1259,6 +1259,68 @@ def list_waiting_games():
     )
 
 
+def list_active_games():
+    """Toutes les parties démarrées et en cours, tous joueurs confondus.
+
+    Les salons WAITING (pas encore démarrés) et les parties terminées/annulées/
+    expirées/abandonnées sont exclus : seules les parties réellement « en cours »
+    sont proposées ici.
+    """
+    return (
+        QuizGlobalGame.objects.filter(
+            status__in=[
+                QuizGlobalGame.Status.THEME_SELECTION,
+                QuizGlobalGame.Status.QUESTION_READING,
+                QuizGlobalGame.Status.ANSWERING,
+                QuizGlobalGame.Status.QUESTION_FINISHED,
+                QuizGlobalGame.Status.TIE_BREAK_THEME,
+            ]
+        )
+        .select_related("invited_player")
+        .prefetch_related("players__player")
+        .order_by("-cree_le")
+    )
+
+
+def serialize_game_public(game: QuizGlobalGame) -> dict:
+    """Résumé public d'une partie en cours (vue spectateur).
+
+    Ne contient JAMAIS la question, ses options, les thèmes ni les réponses :
+    seuls les identifiants, statuts et scores sont exposés aux joueurs tiers.
+    """
+    now = timezone.now()
+    players = _player_map(game)
+    player_a = players.get("A")
+    player_b = players.get("B")
+    gq = _current_question(game)
+
+    def _view(pl: QuizGlobalPlayer | None):
+        if pl is None:
+            return None
+        return {
+            "id": str(pl.player_id),
+            "pseudo": pl.player.pseudo,
+            "seat": pl.seat,
+            "score": pl.score,
+        }
+
+    return {
+        "gameId": game.pk,
+        "status": game.status,
+        "targetQuestions": game.target_questions,
+        "currentTurn": game.current_turn,
+        "activeSeat": game.active_seat,
+        "isTieBreak": game.status == QuizGlobalGame.Status.TIE_BREAK_THEME or bool(
+            gq and gq.is_tie_break and not gq.finished_at
+        ),
+        "mise": f"{game.mise:.2f}",
+        "serverTime": now.isoformat(),
+        "createdAt": game.cree_le.isoformat() if game.cree_le else None,
+        "playerA": _view(player_a),
+        "playerB": _view(player_b),
+    }
+
+
 def list_my_games(user):
     return (
         QuizGlobalGame.objects.filter(players__player=user)

@@ -5,7 +5,12 @@ from strawberry.types import Info
 
 from apps.quiz_global import services
 from apps.quiz_global.active_game_service import get_active_game
-from apps.quiz_global.types import QuizGlobalState, to_state
+from apps.quiz_global.types import (
+    QuizGlobalPublicState,
+    QuizGlobalState,
+    to_public_state,
+    to_state,
+)
 from common.graphql.permissions import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -47,6 +52,22 @@ class QuizGlobalQuery:
         if game is None:
             return None
         return to_state(game, user)
+
+    @strawberry.field
+    def parties_quiz_global_actives(self, info: Info) -> list[QuizGlobalPublicState]:
+        """Toutes les parties démarrées et en cours, tous joueurs confondus.
+
+        Résumé public (aucune question/option exposée) : permet d'afficher les
+        parties actives au-dessus du lobby.
+        """
+        get_current_user(info)
+        result = []
+        for game in services.list_active_games():
+            try:
+                result.append(to_public_state(game))
+            except Exception:
+                logger.exception("Erreur sérialisation partie active game_id=%s", game.pk)
+        return result
 
     @strawberry.field
     def partie_quiz_global(self, info: Info, game_id: int) -> QuizGlobalState:

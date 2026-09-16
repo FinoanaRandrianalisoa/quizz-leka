@@ -1,6 +1,6 @@
 import strawberry
 
-from apps.quiz_global.services import serialize_game
+from apps.quiz_global.services import serialize_game, serialize_game_public
 
 
 @strawberry.type
@@ -81,6 +81,23 @@ class QuizGlobalState:
     results: list[QuizGlobalResultLine] | None = None
 
 
+@strawberry.type
+class QuizGlobalPublicState:
+    """Vue publique (spectateur) d'une partie en cours : aucun contenu de question."""
+
+    game_id: int
+    status: str
+    target_questions: int
+    current_turn: int
+    active_seat: str
+    is_tie_break: bool
+    mise: str
+    server_time: str
+    created_at: str | None
+    player_a: QuizGlobalPlayerView | None
+    player_b: QuizGlobalPlayerView | None
+
+
 def state_from_payload(payload: dict) -> QuizGlobalState:
     question = None
     if payload.get("question"):
@@ -146,3 +163,20 @@ def state_from_payload(payload: dict) -> QuizGlobalState:
 
 def to_state(game, viewer) -> QuizGlobalState:
     return state_from_payload(serialize_game(game, viewer))
+
+
+def to_public_state(game) -> QuizGlobalPublicState:
+    payload = serialize_game_public(game)
+    return QuizGlobalPublicState(
+        game_id=payload["gameId"],
+        status=payload["status"],
+        target_questions=payload["targetQuestions"],
+        current_turn=payload["currentTurn"],
+        active_seat=payload["activeSeat"],
+        is_tie_break=payload.get("isTieBreak", False),
+        mise=payload.get("mise", "0.00"),
+        server_time=payload["serverTime"],
+        created_at=payload.get("createdAt"),
+        player_a=QuizGlobalPlayerView(**payload["playerA"]) if payload.get("playerA") else None,
+        player_b=QuizGlobalPlayerView(**payload["playerB"]) if payload.get("playerB") else None,
+    )

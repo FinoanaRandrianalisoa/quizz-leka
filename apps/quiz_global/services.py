@@ -89,6 +89,28 @@ def _expire_peers(game: QuizGlobalGame, accepted_user) -> None:
     ).exclude(receiver=accepted_user).update(status=QuizGlobalInvitation.Status.EXPIRED)
 
 
+def _realigner_invitation_principale(game: QuizGlobalGame) -> None:
+    """Recale `invited_player` sur une invitation PENDING restante (ou None).
+
+    Le champ hérité `invited_player` sert de garde-fou dans `join_game` : tant
+    qu'une invitation est PENDING, il doit pointer sur un destinataire autorisé.
+    Après annulation/refus, on le réaligne sur la plus ancienne invitation
+    encore PENDING pour ne pas transformer un salon privé en salon public.
+    """
+    pending = (
+        QuizGlobalInvitation.objects.filter(
+            game=game,
+            status=QuizGlobalInvitation.Status.PENDING,
+        )
+        .order_by("created_at", "pk")
+        .first()
+    )
+    new_invited_id = pending.receiver_id if pending else None
+    if game.invited_player_id != new_invited_id:
+        game.invited_player_id = new_invited_id
+        game.save(update_fields=["invited_player"])
+
+
 def _valider_mise(montant, portefeuille) -> Decimal:
     value = Decimal(str(montant or 0)).quantize(Decimal("0.01"))
     if value < 0:
@@ -269,6 +291,21 @@ def weighted_theme(game: QuizGlobalGame) -> Theme:
     return Theme.objects.get(pk=chosen_id)
 
 
+def _pending_invitees(game: QuizGlobalGame) -> list[dict]:
+    """Invités encore en attente d'un salon WAITING (id + pseudo)."""
+    if game.status != QuizGlobalGame.Status.WAITING:
+        return []
+    return [
+        {"id": str(inv.receiver_id), "pseudo": inv.receiver.pseudo}
+        for inv in QuizGlobalInvitation.objects.filter(
+            game=game,
+            status=QuizGlobalInvitation.Status.PENDING,
+        )
+        .select_related("receiver")
+        .order_by("created_at", "pk")
+    ]
+
+
 def serialize_game(game: QuizGlobalGame, viewer=None) -> dict:
     now = timezone.now()
     players = _player_map(game)
@@ -322,6 +359,7 @@ def serialize_game(game: QuizGlobalGame, viewer=None) -> dict:
             "seat": "",
             "score": 0,
         },
+        "pendingInvitees": _pending_invitees(game),
     }
 
     if gq is not None:
@@ -703,13 +741,53 @@ def annuler_game(user, game_id: int) -> bool:
 
 @transaction.atomic
 def refuser_invitation(user, game_id: int) -> bool:
-    game = QuizGlobalGame.objects.select_for_update().filter(pk=game_id).first()
-    if game is None:
-        raise MatchNotFoundError()
-    validate_transition(game.status, QuizGlobalGame.Status.CANCELLED)
-    if game.invited_player_id != user.pk:
+    """Un invité refuse une invitation.
+
+    Avec plusieurs invitations PENDING sur le même salon, refuser n'annule le
+    salon QUE s'il ne reste plus aucun autre invité en attente : sinon le salon
+    reste ouvert pour les autres.
+    """
+    game = _lock_game(game_id)
+    if game.status != QuizGlobalGame.Status.WAITING:
+        raise QuizGlobalError("Cette partie n'est plus en attente.")
+
+    invitation = QuizGlobalInvitation.objects.filter(
+        game=game,
+        receiver_id=user.pk,
+        status=QuizGlobalInvitation.Status.PENDING,
+    ).first()
+    if invitation is None and game.invited_player_id != user.pk:
         raise QuizGlobalError("Aucune invitation en attente pour cette partie.")
+
+    pending_total = QuizGlobalInvitation.objects.filter(
+        game=game,
+        status=QuizGlobalInvitation.Status.PENDING,
+    ).count()
+    remaining = pending_total - (1 if invitation is not None else 0)
+
     host = game.players.filter(seat="A").select_related("player").first()
+
+    if remaining > 0:
+        # D'autres invités peuvent encore accepter : le salon reste ouvert.
+        if invitation is not None:
+            invitation.status = QuizGlobalInvitation.Status.CANCELLED
+            invitation.save(update_fields=["status"])
+        _realigner_invitation_principale(game)
+        _notify(game, "INVITATION_REFUSED")
+        if host is not None:
+            envoyer_notification(
+                host.player,
+                Notification.Type.SYSTEME,
+                "Invitation refusée",
+                f"{user.pseudo} a refusé votre invitation Quizz Global.",
+                reference_id=game.pk,
+                expediteur=user,
+            )
+        broadcast_lobby()
+        return True
+
+    # Dernière invitation (ou salon hérité sans ligne) : le salon est annulé.
+    validate_transition(game.status, QuizGlobalGame.Status.CANCELLED)
     game.status = QuizGlobalGame.Status.CANCELLED
     game.invited_player = None
     game.save(update_fields=["status", "invited_player"])
@@ -726,6 +804,36 @@ def refuser_invitation(user, game_id: int) -> bool:
             reference_id=game.pk,
             expediteur=user,
         )
+    broadcast_lobby()
+    return True
+
+
+@transaction.atomic
+def annuler_invitation(user, game_id: int, receiver_id: int) -> bool:
+    """Annule UNE invitation ciblée d'un salon WAITING (créateur uniquement).
+
+    Contrairement à `annuler_game`, les autres invitations PENDING du même
+    salon restent valides : le salon n'est pas fermé.
+    """
+    game = _lock_game(game_id)
+    if game.status != QuizGlobalGame.Status.WAITING:
+        raise QuizGlobalError("Cette partie n'accepte plus de modifications d'invitation.")
+    host = game.players.filter(player=user).select_related("player").first()
+    if host is None or host.seat != "A":
+        raise QuizGlobalError("Seul le créateur de la partie peut annuler une invitation.")
+
+    invitation = QuizGlobalInvitation.objects.filter(
+        game=game,
+        receiver_id=receiver_id,
+        status=QuizGlobalInvitation.Status.PENDING,
+    ).first()
+    if invitation is None:
+        raise QuizGlobalError("Aucune invitation en attente pour ce joueur.")
+
+    invitation.status = QuizGlobalInvitation.Status.CANCELLED
+    invitation.save(update_fields=["status"])
+    _realigner_invitation_principale(game)
+    _notify(game, "INVITATION_CANCELLED")
     broadcast_lobby()
     return True
 

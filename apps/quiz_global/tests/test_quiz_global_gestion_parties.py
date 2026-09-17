@@ -25,10 +25,12 @@ from apps.quiz_global.models import (
 )
 from apps.quiz_global.services import (
     annuler_game,
+    annuler_invitation,
     create_game,
     inviter_joueur,
     join_game,
     list_my_games_history,
+    refuser_invitation,
 )
 from apps.users.models import Utilisateur
 
@@ -180,6 +182,73 @@ def test_inviter_double_est_idempotent():
     inviter_joueur(a, game.pk, b.pk)
     assert QuizGlobalInvitation.objects.filter(game=game, receiver=b).count() == 1
     assert QuizGlobalInvitation.objects.get(game=game, receiver=b).status == "PENDING"
+
+
+@pytest.mark.django_db
+def test_annuler_une_invitation_garde_le_salon_ouvert():
+    """Annuler une invitation ciblée ne ferme pas le salon (les autres restent)."""
+    a = _user("cia@mg.mg", "CibleA")
+    b = _user("cib@mg.mg", "CibleB")
+    c = _user("cic@mg.mg", "CibleC")
+    game = create_game(a, 4)
+    inviter_joueur(a, game.pk, b.pk)
+    inviter_joueur(a, game.pk, c.pk)
+    game.refresh_from_db()
+    # `invited_player` reste la plus ancienne invitation encore en attente.
+    assert game.invited_player_id == b.pk
+
+    assert annuler_invitation(a, game.pk, c.pk) is True
+    game.refresh_from_db()
+    assert game.status == QuizGlobalGame.Status.WAITING
+    assert QuizGlobalInvitation.objects.get(game=game, receiver=c).status == "CANCELLED"
+    assert QuizGlobalInvitation.objects.get(game=game, receiver=b).status == "PENDING"
+    # `invited_player` a été réaligné sur l'invitation encore valide.
+    assert game.invited_player_id == b.pk
+
+    # B peut encore rejoindre, et le salon n'est pas devenu public.
+    joined = join_game(b, game.pk)
+    assert joined.status == QuizGlobalGame.Status.THEME_SELECTION
+
+
+@pytest.mark.django_db
+def test_refus_invitation_conserve_le_salon_si_autres_invites():
+    a = _user("rfa@mg.mg", "RefusA")
+    b = _user("rfb@mg.mg", "RefusB")
+    c = _user("rfc@mg.mg", "RefusC")
+    game = create_game(a, 4, invite_id=b.pk)
+    inviter_joueur(a, game.pk, c.pk)
+
+    assert refuser_invitation(b, game.pk) is True
+    game.refresh_from_db()
+    assert game.status == QuizGlobalGame.Status.WAITING
+    assert QuizGlobalInvitation.objects.get(game=game, receiver=b).status == "CANCELLED"
+    assert QuizGlobalInvitation.objects.get(game=game, receiver=c).status == "PENDING"
+    assert game.invited_player_id == c.pk
+
+    joined = join_game(c, game.pk)
+    assert joined.status == QuizGlobalGame.Status.THEME_SELECTION
+
+
+@pytest.mark.django_db
+def test_refus_derniere_invitation_annule_le_salon():
+    a = _user("rla@mg.mg", "LastA")
+    b = _user("rlb@mg.mg", "LastB")
+    game = create_game(a, 4, invite_id=b.pk)
+
+    assert refuser_invitation(b, game.pk) is True
+    game.refresh_from_db()
+    assert game.status == QuizGlobalGame.Status.CANCELLED
+    assert game.invited_player_id is None
+
+
+@pytest.mark.django_db
+def test_annuler_invitation_reservee_au_createur():
+    a = _user("pca@mg.mg", "PropA")
+    b = _user("pcb@mg.mg", "PropB")
+    c = _user("pcc@mg.mg", "PropC")
+    game = create_game(a, 4, invite_id=b.pk)
+    with pytest.raises(QuizGlobalError):
+        annuler_invitation(c, game.pk, b.pk)
 
 
 @pytest.mark.django_db

@@ -57,6 +57,12 @@ class QuizGlobalResultLine:
 
 
 @strawberry.type
+class QuizGlobalInviteeView:
+    id: str
+    pseudo: str
+
+
+@strawberry.type
 class QuizGlobalState:
     game_id: int
     status: str
@@ -79,6 +85,7 @@ class QuizGlobalState:
     my_answer: QuizGlobalMyAnswer | None
     my_seat: str | None
     results: list[QuizGlobalResultLine] | None = None
+    pending_invitees: list[QuizGlobalInviteeView] = strawberry.field(default_factory=list)
 
 
 @strawberry.type
@@ -158,6 +165,9 @@ def state_from_payload(payload: dict) -> QuizGlobalState:
         my_answer=my_answer,
         my_seat=payload.get("mySeat"),
         results=results,
+        pending_invitees=[
+            QuizGlobalInviteeView(**p) for p in payload.get("pendingInvitees") or []
+        ],
     )
 
 

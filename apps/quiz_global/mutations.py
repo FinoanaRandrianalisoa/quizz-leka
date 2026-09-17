@@ -60,6 +60,12 @@ class QuizGlobalMutation:
         return services.refuser_invitation(user, game_id)
 
     @strawberry.mutation
+    def annuler_invitation_quiz_global(self, info: Info, game_id: int, receiver_id: int) -> bool:
+        """Annule une invitation ciblée sans fermer le salon (créateur uniquement)."""
+        user = get_current_user(info)
+        return services.annuler_invitation(user, game_id, receiver_id)
+
+    @strawberry.mutation
     def inviter_partie_quiz_global(self, info: Info, game_id: int, invite_id: int) -> QuizGlobalState:
         """Invite un joueur supplémentaire dans un salon WAITING du créateur.
 

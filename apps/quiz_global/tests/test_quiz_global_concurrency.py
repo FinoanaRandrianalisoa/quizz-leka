@@ -206,8 +206,8 @@ def test_waiting_game_expires_and_mise_is_refunded():
     pf_a.refresh_from_db()
     assert pf_a.solde_bloque == Decimal("100")
 
-    # Fais vieillir le salon au-delà des 30 minutes de délai d'expiration.
-    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=31))
+    # Fais vieillir le salon au-delà des 5 minutes de délai d'expiration.
+    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=6))
 
     assert expirer_parties_en_attente() == 1
     game.refresh_from_db()
@@ -246,7 +246,7 @@ def test_get_game_expires_old_waiting_game():
     a = _user("get@conc.mg", "GetA")
     b = _user("getb@conc.mg", "GetB")
     game = create_game(a, 4, invite_id=b.pk)
-    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=31))
+    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=6))
 
     with pytest.raises(MatchNotFoundError):
         get_game(game.pk)
@@ -264,7 +264,7 @@ def test_join_expired_waiting_game_is_cancelled():
     a = _user("join@conc.mg", "JoinA")
     b = _user("joinb@conc.mg", "JoinB")
     game = create_game(a, 4, invite_id=b.pk)
-    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=31))
+    QuizGlobalGame.objects.filter(pk=game.pk).update(cree_le=timezone.now() - timedelta(minutes=6))
 
     with pytest.raises(GameCancelledError):
         join_game(b, game.pk)

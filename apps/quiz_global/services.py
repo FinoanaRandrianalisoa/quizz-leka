@@ -55,7 +55,7 @@ ANSWERING_DURATION = timedelta(seconds=10)
 RESULT_DURATION = timedelta(seconds=5)
 TARGET_ALLOWED = {4, 8, 12}
 OPTION_LETTERS = ("A", "B", "C", "D")
-WAITING_EXPIRY_SECONDS = 30 * 60  # 30 minutes : salon qui ne rejoint personne -> EXPIRED
+WAITING_EXPIRY_SECONDS = 5 * 60  # 5 minutes : salon public ou invitation privée sans adversaire -> EXPIRED
 ABANDON_TIMEOUT_SECONDS = 120  # 2 minutes sans progression de phase -> ABANDONED
 
 
